@@ -29,7 +29,7 @@ def test_mlx_profile_present_in_root_yaml():
     assert "mlx-local" in raw["profiles"]
     profile = raw["profiles"]["mlx-local"]
     assert profile["provider"] == "openai"
-    assert profile["llm"]["base_url"] == "http://localhost:8000"
+    assert profile["llm"]["base_url"] == "http://localhost:8000/v1"
     assert profile["llm"]["api_key"] == "PostFuru"
     assert "model" in profile["llm"]
 
@@ -42,7 +42,7 @@ def test_mlx_profile_present_in_packaged_template():
     assert "mlx-local" in packaged["profiles"]
     profile = packaged["profiles"]["mlx-local"]
     assert profile["provider"] == "openai"
-    assert profile["llm"]["base_url"] == "http://localhost:8000"
+    assert profile["llm"]["base_url"] == "http://localhost:8000/v1"
     assert "api_key" in profile["llm"]
 
 

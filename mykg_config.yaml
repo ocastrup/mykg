@@ -728,7 +728,7 @@ profiles:
       context_window: 32768       # ① model's total context limit — adjust per model
       max_output_tokens: 8192     # ② output cap
       model: Qwen3.5-9B-Claude-4.6-HighIQ-INSTRUCT-HERETIC-UNCENSORED-MLX-mxfp8
-      base_url: http://localhost:8000
+      base_url: http://localhost:8000/v1
       api_key: PostFuru           # placeholder; mlx_lm.server accepts any non-empty value
       timeout: 600                # seconds per LLM call; local inference varies with load
       retry_429_max: 3
