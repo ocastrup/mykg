@@ -2,7 +2,7 @@
 # myKG — Knowledge Graph Extractor
 # =============================================================================
 # ACTIVE PROFILE — change this one line to switch provider and all settings.
-# Available: ollama-local | anthropic-claude | openai | openrouter-free | claude-cli | agent-claude-code
+# Available: ollama-local | mlx-local | anthropic-claude | openai | openrouter-free | claude-cli | agent-claude-code
 # =============================================================================
 profile: openrouter-free
 
@@ -703,6 +703,144 @@ profiles:
         surgical_top_k_chunks_per_property: 0  # 0 = no cap; >0 = top-K chunks per new property (ranked by domain/range node co-occurrence)
         human_review: false             # pause for human review of merged schema; overridden by --human-review CLI flag
         orphan_pass_max_restarts: 1     # max schema-gap restart loops during merge orphan pass (0 = disabled)
+
+  # ---------------------------------------------------------------------------
+  mlx-local:
+  # MLX LM Server — OpenAI-compatible local inference via Apple MLX.
+  # Start server: mlx_lm.server --model <model-path> --port 8000
+  # No real API key required; PostFuru is a placeholder accepted by the server.
+  #
+  # Token budget chain — adjust for your model's actual context window:
+  #   ① context_window    = 32768   (conservative; Qwen-family supports up to 128K — check model config)
+  #   ② max_output_tokens = 8192
+  #   ③ input_headroom    = ① − ② = 24576
+  #      batch_token_target = ③ × 0.95 = 23000  (5% safety margin)
+  #      window_tokens      = batch_token_target / 4 = 5750  (~25% of batch_token_target)
+  #      overlap_tokens     = window_tokens × 0.10 = 575
+  #
+  # Run: context-calculator --context 32768 --max-output 8192
+  # to recompute all values if you change the context window.
+  # ---------------------------------------------------------------------------
+    provider: openai
+    llm_retry:
+      max_retries: 2        # retries on empty/blank response; set to 0 to disable
+    llm:
+      context_window: 32768       # ① model's total context limit — adjust per model
+      max_output_tokens: 8192     # ② output cap
+      model: Qwen3.5-9B-Claude-4.6-HighIQ-INSTRUCT-HERETIC-UNCENSORED-MLX-mxfp8
+      base_url: http://localhost:8000
+      api_key: PostFuru           # placeholder; mlx_lm.server accepts any non-empty value
+      timeout: 600                # seconds per LLM call; local inference varies with load
+      retry_429_max: 3
+      retry_429_base_delay: 2.0
+    pipeline:
+      # --- Ingestion & chunking -----------------------------------------------
+      ingest:
+        max_workers: 4            # local GPU is the bottleneck; keep workers modest
+      # --- Preprocess (optional non-md document conversion via MinerU) ----------
+      preprocess:
+        enabled: true
+        subdir: _preprocessed
+        keep_artifacts: false
+        extra_args: []
+        timeout_seconds: 1800
+        uv_path: uv
+        uv_python_version: "3.12"
+        mineru_spec: mineru[all]
+        install_timeout_seconds: 1800
+        extensions:
+          - .pdf
+          - .docx
+          - .doc
+          - .pptx
+          - .png
+          - .jpg
+          - .jpeg
+          - .html
+          - .htm
+      chunking:
+        window_tokens: 5750     # = input_headroom / 4 ≈ 5750
+        overlap_tokens: 575     # = window_tokens × 0.10
+        tiktoken_encoding: cl100k_base
+      # --- Pass 1: schema induction -------------------------------------------
+      pass1:
+        batch_token_target: 23000   # = input_headroom × 0.95 ≈ 23000
+        max_workers: 2
+        per_file_batching: false
+      # --- Pass 2: instance extraction ----------------------------------------
+      pass2:
+        max_workers: 4
+        stateful_chunks: true
+        prep_mode: per_file
+        concat_batch_token_target: 23000
+        batch_token_target: 23000
+        batch_per_file: false
+        batch_retry_max: 1
+      normalize_names:
+        enabled: true
+        max_names_per_type: 500   # keep smaller — local models are slower
+      # --- Orphan recovery -----------------------------------------------------
+      orphan_pass:
+        enabled: true
+        min_cooccurrence: 1
+        top_k_per_orphan: 5
+        confidence_base: 0.5
+        confidence_weight: 0.5
+        max_workers: 4
+        schema_max_restarts: 0
+        excerpt_window: 2000
+        excerpt_context: 500
+        excerpt_max_total: 8000
+        blank_recovery_enabled: true
+        connected_sample_size: 50
+      # --- Assembly & deduplication -------------------------------------------
+      assembly:
+        confidence_agg: mean
+        edge_id_prefix: "edge-"
+        edge_id_hex_length: 6
+        edge_dedup_separator: "|"
+        confidence_fallback: 0.0
+        confidence_scalar_omitted: 0.5
+      # --- Export --------------------------------------------------------------
+      export:
+        schema_namespace: "http://mykg.local/schema/"
+        data_namespace: "http://mykg.local/data/"
+        rdf_namespace: "http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+        rdfs_namespace: "http://www.w3.org/2000/01/rdf-schema#"
+        schema_prefix_label: ex
+        data_prefix_label: data
+        comment_width: 42
+        skos_namespace: "http://www.w3.org/2004/02/skos/core#"
+        networkx_enabled: true
+        obsidian_enabled: true
+        obsidian_vault_dir: obsidian_vault
+        neo4j_csv_enabled: false
+        neo4j_csv_dir: neo4j_csv
+      # --- Pipeline infrastructure --------------------------------------------
+      error_gate:
+        enabled: false
+        threshold: 3
+      feedback:
+        max_file_chars: 32000
+      paths:
+        output_dir: output
+        intermediate_dir: intermediate
+        sessions_dir: mykg_sessions
+      output:
+        json_indent: 2
+      logging:
+        max_bytes: 10485760
+        backup_count: 3
+        llm_log: false
+        capture_prompts: false
+        error_output_max_chars: 500
+      report:
+        enabled: true
+      merge_graphs:
+        reextraction_strategy: surgical
+        surgical_top_k_chunks_per_property: 0
+        human_review: false
+        orphan_pass_max_restarts: 1
 
   # ---------------------------------------------------------------------------
   agent-claude-code:
