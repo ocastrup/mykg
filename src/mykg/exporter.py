@@ -870,6 +870,14 @@ def _obsidian_index(nodes: list[dict], edge_count: int) -> str:
     return "\n".join(lines)
 
 
+def _vault_report_path(path: Path, output_dir: Path) -> str:
+    """Path relative to output_dir when inside it, absolute otherwise."""
+    try:
+        return str(path.relative_to(output_dir))
+    except ValueError:
+        return str(path)
+
+
 def export_obsidian(
     nodes: list[dict],
     edge_metadata: dict,
@@ -887,8 +895,9 @@ def export_obsidian(
     if not getattr(_cfg, "OBSIDIAN_ENABLED", False):
         return []
 
-    vault_dir = output_dir / "obsidian_vault"
-    vault_dir.mkdir(exist_ok=True)
+    vault_setting = Path(getattr(_cfg, "OBSIDIAN_VAULT_DIR", "obsidian_vault"))
+    vault_dir = vault_setting if vault_setting.is_absolute() else output_dir / vault_setting
+    vault_dir.mkdir(parents=True, exist_ok=True)
 
     # Build id → display_name lookup for wikilinks
     id_to_name: dict[str, str] = {node["id"]: _node_display_name(node) for node in nodes}
@@ -928,12 +937,12 @@ def export_obsidian(
         )
         note_path = type_dir / f"{node_id}.md"
         note_path.write_text(note_content, encoding="utf-8")
-        # Derive the relative path from the actual filesystem path to stay in sync
-        written.append(str(note_path.relative_to(output_dir)))
+        written.append(_vault_report_path(note_path, output_dir))
 
     # Index
     index_content = _obsidian_index(nodes, edge_count=len(edge_metadata))
-    (vault_dir / "index.md").write_text(index_content, encoding="utf-8")
-    written.append("obsidian_vault/index.md")
+    index_path = vault_dir / "index.md"
+    index_path.write_text(index_content, encoding="utf-8")
+    written.append(_vault_report_path(index_path, output_dir))
 
     return written

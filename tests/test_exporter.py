@@ -209,6 +209,7 @@ def _run_obsidian(tmp_path: Path) -> list[str]:
     """Call export_obsidian with OBSIDIAN_ENABLED patched to True."""
     with mock.patch("mykg.exporter._cfg") as mock_cfg:
         mock_cfg.OBSIDIAN_ENABLED = True
+        mock_cfg.OBSIDIAN_VAULT_DIR = "obsidian_vault"
         mock_cfg.JSON_INDENT = 2
         return export_obsidian(_OBS_NODES, _OBS_EDGE_METADATA, _OBS_SCHEMA, tmp_path)
 
@@ -236,6 +237,35 @@ def test_obsidian_creates_node_files(tmp_path: Path) -> None:
     assert (vault / "Person" / "person-alice-johnson.md").exists()
     assert (vault / "Organization" / "organization-acme-corp.md").exists()
     assert (vault / "Person" / "person-bob-smith.md").exists()
+
+
+def test_obsidian_honors_relative_vault_dir_config(tmp_path: Path) -> None:
+    """A relative OBSIDIAN_VAULT_DIR is resolved under output_dir."""
+    with mock.patch("mykg.exporter._cfg") as mock_cfg:
+        mock_cfg.OBSIDIAN_ENABLED = True
+        mock_cfg.OBSIDIAN_VAULT_DIR = "custom_vault"
+        mock_cfg.JSON_INDENT = 2
+        written = export_obsidian(_OBS_NODES, _OBS_EDGE_METADATA, _OBS_SCHEMA, tmp_path)
+    vault = tmp_path / "custom_vault"
+    assert (vault / "Person" / "person-alice-johnson.md").exists()
+    assert (vault / "index.md").exists()
+    assert "custom_vault/index.md" in written
+
+
+def test_obsidian_honors_absolute_vault_dir_config(tmp_path: Path) -> None:
+    """An absolute OBSIDIAN_VAULT_DIR is used as-is, outside output_dir."""
+    target = tmp_path / "elsewhere" / "vault"  # parent dir does not exist yet
+    output_dir = tmp_path / "session_output"
+    output_dir.mkdir()
+    with mock.patch("mykg.exporter._cfg") as mock_cfg:
+        mock_cfg.OBSIDIAN_ENABLED = True
+        mock_cfg.OBSIDIAN_VAULT_DIR = str(target)
+        mock_cfg.JSON_INDENT = 2
+        written = export_obsidian(_OBS_NODES, _OBS_EDGE_METADATA, _OBS_SCHEMA, output_dir)
+    assert (target / "Person" / "person-alice-johnson.md").exists()
+    assert (target / "index.md").exists()
+    assert not (output_dir / "obsidian_vault").exists()
+    assert str(target / "index.md") in written
 
 
 def test_obsidian_frontmatter_is_valid_yaml(tmp_path: Path) -> None:

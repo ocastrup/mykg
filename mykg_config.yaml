@@ -4,7 +4,7 @@
 # ACTIVE PROFILE — change this one line to switch provider and all settings.
 # Available: ollama-local | mlx-local | anthropic-claude | openai | openrouter-free | claude-cli | agent-claude-code
 # =============================================================================
-profile: openrouter-free
+profile: agent-claude-code
 
 # ---------------------------------------------------------------------------
 # Profiles — each is fully self-contained: provider, credentials, and pipeline.
@@ -940,8 +940,8 @@ profiles:
         comment_width: 42
         skos_namespace: "http://www.w3.org/2004/02/skos/core#"
         networkx_enabled: true
-        obsidian_enabled: false
-        obsidian_vault_dir: obsidian_vault
+        obsidian_enabled: true
+        obsidian_vault_dir: /Users/oca/Documents/MyKG/obsidian_vault  # absolute path — vault lives outside the session folder
         neo4j_csv_enabled: false
         neo4j_csv_dir: neo4j_csv
       error_gate:
