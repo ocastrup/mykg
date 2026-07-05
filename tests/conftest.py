@@ -4,6 +4,29 @@ from pathlib import Path
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _isolate_mykg_config(tmp_path, monkeypatch):
+    """Keep every test off the real filesystem.
+
+    ``mykg.config`` loads the live ``mykg_config.yaml`` (searched upward from
+    cwd) at import time, so an unpatched test inherits real user paths —
+    ``SESSIONS_DIR`` creates session dirs in the repo, and an absolute
+    ``OBSIDIAN_VAULT_DIR`` can make ``_delete_from_step`` rmtree a real vault.
+    Redirect those values to safe defaults for all tests; tests that need
+    specific values monkeypatch on top of this fixture.
+    """
+    from mykg import config as cfg_mod
+
+    monkeypatch.setattr(cfg_mod, "SESSIONS_DIR", str(tmp_path / "_mykg_sessions"))
+    monkeypatch.setattr(cfg_mod, "OBSIDIAN_ENABLED", False)
+    monkeypatch.setattr(cfg_mod, "OBSIDIAN_VAULT_DIR", "obsidian_vault")
+    monkeypatch.setattr(cfg_mod, "NEO4J_CSV_ENABLED", False)
+    monkeypatch.setattr(cfg_mod, "NEO4J_CSV_DIR", "neo4j_csv")
+    # Behavioural knob the merge_run restart tests depend on: pin to the code
+    # default so the suite passes regardless of the active profile's value.
+    monkeypatch.setattr(cfg_mod, "MERGE_ORPHAN_SCHEMA_MAX_RESTARTS", 1)
+
+
 def _load_key(env_var: str) -> str | None:
     key = os.environ.get(env_var, "").strip()
     if not key:
