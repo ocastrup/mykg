@@ -7,7 +7,7 @@ import yaml
 
 from mykg.chunker import count_tokens
 from mykg.llm.adapter import LLMAdapter
-from mykg.wiki.loader import Neighbor, WikiNode
+from mykg.wiki.loader import Neighbor, WikiGraph, WikiNode
 
 _WIKILINK = re.compile(r"\[\[(.*?)\]\]", re.DOTALL)
 
@@ -124,3 +124,36 @@ def generate_entity_page(node: WikiNode, neighbors: list[Neighbor], adapter: LLM
     allowed = {n.id for n in neighbors}
     cleaned, _dropped = strip_invalid_wikilinks(body, allowed)
     return render_entity_page(node, cleaned)
+
+
+def extract_lead(page_markdown: str) -> str:
+    body = page_markdown
+    if body.startswith("---\n"):
+        body = body.split("---\n", 2)[-1]
+    for para in (p.strip() for p in body.split("\n\n")):
+        if para and not para.startswith("#") and not para.startswith("*"):
+            return " ".join(para.split())
+    return ""
+
+
+def render_hub_page(type_name: str, nodes: list["WikiNode"], leads: dict[str, str]) -> str:
+    lines = [f"# {type_name}", "", f"{len(nodes)} ent"
+             f"{'ry' if len(nodes) == 1 else 'ries'}.", ""]
+    for n in sorted(nodes, key=lambda n: n.name.lower()):
+        lead = leads.get(n.id, "")
+        suffix = f" — {lead}" if lead else ""
+        lines.append(f"- [[{n.id}|{n.name}]]{suffix}")
+    return "\n".join(lines) + "\n"
+
+
+def render_home_page(graph: WikiGraph, session_name: str, generated_at: str) -> str:
+    lines = [
+        "# Wiki Home", "",
+        f"- Entities: {len(graph.nodes)}",
+        f"- Relationships: {len(graph.edges)}",
+        f"- Source session: `{session_name}`",
+        f"- Generated: {generated_at}", "",
+        "## Type hubs", "",
+    ]
+    lines += [f"- [[hubs/{t}|{t}]]" for t in graph.types]
+    return "\n".join(lines) + "\n"

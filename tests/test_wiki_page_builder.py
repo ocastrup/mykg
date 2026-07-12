@@ -3,11 +3,14 @@ from __future__ import annotations
 
 import yaml
 
-from mykg.wiki.loader import Neighbor, WikiNode
+from mykg.wiki.loader import Neighbor, WikiGraph, WikiNode
 from mykg.wiki.page_builder import (
     build_entity_prompt,
+    extract_lead,
     generate_entity_page,
     render_entity_page,
+    render_home_page,
+    render_hub_page,
     render_stub_page,
     strip_invalid_wikilinks,
 )
@@ -133,3 +136,24 @@ def test_blank_reply_falls_back_to_stub():
     assert fm["mykg_id"] == "person-alice"
     assert "## Connections" in page
     assert "[[org-acme|Acme]] (works_at)" in page
+
+
+def test_extract_lead_skips_frontmatter_and_heading():
+    page = "---\nmykg_id: x\n---\n\n## Alice\n\nAlice works at Acme.\n\nMore text."
+    assert extract_lead(page) == "Alice works at Acme."
+
+
+def test_hub_lists_every_entity_of_type():
+    nodes = [_node()]  # from earlier in this file (person-alice)
+    hub = render_hub_page("Person", nodes, {"person-alice": "Alice works at Acme."})
+    assert "# Person" in hub
+    assert "[[person-alice|Alice]]" in hub
+    assert "Alice works at Acme." in hub
+
+
+def test_home_links_every_type_hub():
+    g = WikiGraph(nodes={"person-alice": _node()}, edges=[], types=["Person", "Organization"])
+    home = render_home_page(g, "2026-07-05T08-41-11", "2026-07-12T10:00:00Z")
+    assert "[[hubs/Person|Person]]" in home
+    assert "[[hubs/Organization|Organization]]" in home
+    assert "1" in home  # node count
