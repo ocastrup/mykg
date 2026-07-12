@@ -127,6 +127,13 @@ profiles:
         obsidian_vault_dir: obsidian_vault  # subdirectory under output/ for the Obsidian vault
         neo4j_csv_enabled: false    # write Neo4j LOAD CSV bundle to output/neo4j_csv/ (CSVs + browser/cypher-shell scripts + README)
         neo4j_csv_dir: neo4j_csv    # subdirectory under output/ for the Neo4j LOAD CSV bundle
+      wiki:
+        vault_dir: wiki_vault       # relative to session root, or absolute
+        max_workers: 4
+        min_attr_confidence: 0.3    # drop attributes below this from the LLM prompt
+        min_edge_confidence: 0.3    # drop links (and neighbor context) below this
+        max_grounding_tokens: 4000  # cap source-chunk text fed per page
+        neighbors_max: 25           # cap 1-hop neighbor list per page
       # --- Pipeline infrastructure --------------------------------------------
       error_gate:               # circuit-breaker: pauses the run when too many API errors accumulate
         enabled: false          # set false for fully unattended runs (e.g. providers with no rate limits)
@@ -264,6 +271,13 @@ profiles:
         obsidian_vault_dir: obsidian_vault
         neo4j_csv_enabled: false
         neo4j_csv_dir: neo4j_csv
+      wiki:
+        vault_dir: wiki_vault       # relative to session root, or absolute
+        max_workers: 4
+        min_attr_confidence: 0.3    # drop attributes below this from the LLM prompt
+        min_edge_confidence: 0.3    # drop links (and neighbor context) below this
+        max_grounding_tokens: 4000  # cap source-chunk text fed per page
+        neighbors_max: 25           # cap 1-hop neighbor list per page
       # --- Pipeline infrastructure --------------------------------------------
       error_gate:
         enabled: false
@@ -398,6 +412,13 @@ profiles:
         networkx_enabled: true     # write NetworkX multi-format exports to output/networkx_output/ (GML, GraphML, GEXF, etc.)
         neo4j_csv_enabled: false    # write Neo4j LOAD CSV bundle to output/neo4j_csv/ (CSVs + browser/cypher-shell scripts + README)
         neo4j_csv_dir: neo4j_csv    # subdirectory under output/ for the Neo4j LOAD CSV bundle
+      wiki:
+        vault_dir: wiki_vault       # relative to session root, or absolute
+        max_workers: 4
+        min_attr_confidence: 0.3    # drop attributes below this from the LLM prompt
+        min_edge_confidence: 0.3    # drop links (and neighbor context) below this
+        max_grounding_tokens: 4000  # cap source-chunk text fed per page
+        neighbors_max: 25           # cap 1-hop neighbor list per page
       # --- Pipeline infrastructure --------------------------------------------
       error_gate:               # circuit-breaker: pauses the run when too many API errors accumulate
         enabled: false
@@ -541,6 +562,13 @@ profiles:
         obsidian_vault_dir: obsidian_vault
         neo4j_csv_enabled: false
         neo4j_csv_dir: neo4j_csv
+      wiki:
+        vault_dir: wiki_vault       # relative to session root, or absolute
+        max_workers: 4
+        min_attr_confidence: 0.3    # drop attributes below this from the LLM prompt
+        min_edge_confidence: 0.3    # drop links (and neighbor context) below this
+        max_grounding_tokens: 4000  # cap source-chunk text fed per page
+        neighbors_max: 25           # cap 1-hop neighbor list per page
       # --- Pipeline infrastructure --------------------------------------------
       error_gate:
         enabled: false
@@ -678,6 +706,13 @@ profiles:
         obsidian_vault_dir: obsidian_vault
         neo4j_csv_enabled: false
         neo4j_csv_dir: neo4j_csv
+      wiki:
+        vault_dir: wiki_vault       # relative to session root, or absolute
+        max_workers: 4
+        min_attr_confidence: 0.3    # drop attributes below this from the LLM prompt
+        min_edge_confidence: 0.3    # drop links (and neighbor context) below this
+        max_grounding_tokens: 4000  # cap source-chunk text fed per page
+        neighbors_max: 25           # cap 1-hop neighbor list per page
       # --- Pipeline infrastructure --------------------------------------------
       error_gate:
         enabled: false
@@ -816,6 +851,13 @@ profiles:
         obsidian_vault_dir: obsidian_vault
         neo4j_csv_enabled: false
         neo4j_csv_dir: neo4j_csv
+      wiki:
+        vault_dir: wiki_vault       # relative to session root, or absolute
+        max_workers: 4
+        min_attr_confidence: 0.3    # drop attributes below this from the LLM prompt
+        min_edge_confidence: 0.3    # drop links (and neighbor context) below this
+        max_grounding_tokens: 4000  # cap source-chunk text fed per page
+        neighbors_max: 25           # cap 1-hop neighbor list per page
       # --- Pipeline infrastructure --------------------------------------------
       error_gate:
         enabled: false
@@ -944,6 +986,13 @@ profiles:
         obsidian_vault_dir: obsidian_vault
         neo4j_csv_enabled: false
         neo4j_csv_dir: neo4j_csv
+      wiki:
+        vault_dir: wiki_vault       # relative to session root, or absolute
+        max_workers: 4
+        min_attr_confidence: 0.3    # drop attributes below this from the LLM prompt
+        min_edge_confidence: 0.3    # drop links (and neighbor context) below this
+        max_grounding_tokens: 4000  # cap source-chunk text fed per page
+        neighbors_max: 25           # cap 1-hop neighbor list per page
       error_gate:
         enabled: false
         threshold: 3

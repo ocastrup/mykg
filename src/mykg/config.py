@@ -142,6 +142,14 @@ OBSIDIAN_VAULT_DIR: str = _get_opt("export", "obsidian_vault_dir", "obsidian_vau
 NEO4J_CSV_ENABLED: bool = _get_opt("export", "neo4j_csv_enabled", False)
 NEO4J_CSV_DIR: str = _get_opt("export", "neo4j_csv_dir", "neo4j_csv")
 
+# Wiki (build-wiki command) — optional; defaults apply when a profile omits `wiki:`
+WIKI_VAULT_DIR: str = _get_opt("wiki", "vault_dir", "wiki_vault")
+WIKI_MAX_WORKERS: int = int(_get_opt("wiki", "max_workers", 4))
+WIKI_MIN_ATTR_CONFIDENCE: float = float(_get_opt("wiki", "min_attr_confidence", 0.3))
+WIKI_MIN_EDGE_CONFIDENCE: float = float(_get_opt("wiki", "min_edge_confidence", 0.3))
+WIKI_MAX_GROUNDING_TOKENS: int = int(_get_opt("wiki", "max_grounding_tokens", 4000))
+WIKI_NEIGHBORS_MAX: int = int(_get_opt("wiki", "neighbors_max", 25))
+
 # ---------------------------------------------------------------------------
 # Output / intermediate paths (D16, D18)
 # ---------------------------------------------------------------------------
