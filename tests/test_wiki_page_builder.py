@@ -5,6 +5,8 @@ import yaml
 
 from mykg.wiki.loader import Neighbor, WikiNode
 from mykg.wiki.page_builder import (
+    build_entity_prompt,
+    generate_entity_page,
     render_entity_page,
     render_stub_page,
     strip_invalid_wikilinks,
@@ -80,3 +82,54 @@ def test_stub_page_flags_ungrounded():
     fm = yaml.safe_load(page.split("---\n")[1])
     assert fm["grounded"] is False
     assert "[[org-acme|Acme]]" in page
+
+
+class _StubAdapter:
+    def __init__(self, reply: str):
+        self.reply, self.calls = reply, []
+
+    def complete(self, system, user, context_label="", max_tokens=None, timeout=None):
+        self.calls.append(user)
+        return self.reply
+
+
+def _alice_and_neighbor():
+    node = WikiNode(
+        id="person-alice", type="Person", name="Alice",
+        attributes={"name": {"value": "Alice", "confidence": 0.9},
+                    "affiliation": {"value": "Acme", "confidence": 0.1}},
+        source_files=["doc.md"], grounded_chunk_keys=["doc.md::1"],
+        grounded_chunks=["Alice works at Acme."], grounded=True)
+    nb = [Neighbor(id="org-acme", name="Acme", type="Organization",
+                   relationship="works_at", confidence=0.7)]
+    return node, nb
+
+
+def test_prompt_drops_low_confidence_attributes():
+    node, nb = _alice_and_neighbor()
+    _system, user = build_entity_prompt(node, nb, min_attr_confidence=0.3,
+                                        max_grounding_tokens=4000)
+    assert "Alice works at Acme." in user     # grounding included
+    assert "org-acme" in user                 # neighbor offered for linking
+    assert "affiliation" not in user          # 0.1 < 0.3 filtered out
+
+
+def test_generate_strips_invented_links_and_wraps():
+    node, nb = _alice_and_neighbor()
+    reply = "## Alice\n\nWorks at [[org-acme|Acme]] with [[person-ghost|Ghost]]."
+    page = generate_entity_page(node, nb, _StubAdapter(reply),
+                                min_attr_confidence=0.3, max_grounding_tokens=4000)
+    assert "[[org-acme|Acme]]" in page
+    assert "person-ghost" not in page
+    assert page.startswith("---\n")
+
+
+def test_blank_reply_falls_back_to_stub():
+    node, nb = _alice_and_neighbor()
+    page = generate_entity_page(node, nb, _StubAdapter("   "),
+                                min_attr_confidence=0.3, max_grounding_tokens=4000)
+    fm = yaml.safe_load(page.split("---\n")[1])
+    assert fm["grounded"] is True             # node had grounding...
+    assert fm["mykg_id"] == "person-alice"
+    assert "## Connections" in page
+    assert "[[org-acme|Acme]] (works_at)" in page
