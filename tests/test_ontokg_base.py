@@ -77,3 +77,34 @@ def test_intrinsic_class_names_pascalcase_and_unique(m):
     for cls, parent in m.INTRINSIC.values():
         assert cls[0].isupper() and "_" not in cls, cls
         assert parent in m.CATEGORIES, parent
+
+
+def test_build_ttl_roundtrips_through_parse_base_schema(m):
+    from mykg.base_schema import parse_base_schema
+
+    parsed = parse_base_schema(m.build_ttl())
+    lc = parsed["locked_classes"]
+    lp = parsed["locked_properties"]
+
+    # Synthetic root + 8 categories under it.
+    assert "Entity" in lc
+    for cat in m.CATEGORIES:
+        assert cat in lc, cat
+        assert lc[cat]["parent"] == "Entity", cat
+
+    # Every intrinsic module → locked subclass of its category.
+    for tag, (cls, parent) in m.INTRINSIC.items():
+        assert cls in lc, cls
+        assert lc[cls]["parent"] == parent, cls
+
+    # Every relational module → locked object property with range :Entity.
+    # parse_base_schema records only the FIRST domain (spec §8.4) — assert that.
+    for tag, (auth, domains) in m.RELATIONAL.items():
+        assert tag in lp, tag
+        assert lp[tag]["range"] == "Entity", tag
+        assert lp[tag]["domain"] == domains[0], tag
+
+    # No name is both a class and a property.
+    assert not (set(lc) & set(lp))
+    # Nothing became a datatype attribute (no rdfs:Literal ranges used).
+    assert all(c["attributes"] == [] for c in lc.values())
