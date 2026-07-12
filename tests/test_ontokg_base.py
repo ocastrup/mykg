@@ -108,3 +108,19 @@ def test_build_ttl_roundtrips_through_parse_base_schema(m):
     assert not (set(lc) & set(lp))
     # Nothing became a datatype attribute (no rdfs:Literal ranges used).
     assert all(c["attributes"] == [] for c in lc.values())
+
+
+def test_build_mapping_md_has_a_row_per_module(m):
+    md = m.build_mapping_md()
+    # Header columns (spec §6): module | category(ies) | type | A|I | representation
+    assert "| module |" in md
+    assert "intrinsic" in md and "relational" in md
+    # One table row per distinct module.
+    for tag in list(m.INTRINSIC) + list(m.RELATIONAL):
+        assert f"| `{tag}` |" in md, f"missing row for {tag}"
+    # Authority markers only ever A or I.
+    for tag, (auth, _) in m.RELATIONAL.items():
+        assert f"| {auth} |" in md
+    # Total data rows == distinct module count.
+    data_rows = [ln for ln in md.splitlines() if ln.startswith("| `")]
+    assert len(data_rows) == len(m.INTRINSIC) + len(m.RELATIONAL)
