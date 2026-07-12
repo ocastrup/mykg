@@ -124,3 +124,21 @@ def test_build_mapping_md_has_a_row_per_module(m):
     # Total data rows == distinct module count.
     data_rows = [ln for ln in md.splitlines() if ln.startswith("| `")]
     assert len(data_rows) == len(m.INTRINSIC) + len(m.RELATIONAL)
+
+
+def test_validate_accepts_committed_ttl(m):
+    ttl_path = SCRIPT.parent / "ontokg-base.ttl"
+    parsed = m.validate(ttl_path)  # asserts internally; returns parsed dict
+    assert "Entity" in parsed["locked_classes"]
+
+
+def test_committed_ttl_matches_generator(m):
+    # The committed artifact must be exactly what build_ttl() produces —
+    # catches a stale checked-in file.
+    ttl_path = SCRIPT.parent / "ontokg-base.ttl"
+    assert ttl_path.read_text() == m.build_ttl()
+
+
+def test_committed_mapping_matches_generator(m):
+    md_path = SCRIPT.parent / "ontokg-mapping.md"
+    assert md_path.read_text() == m.build_mapping_md()

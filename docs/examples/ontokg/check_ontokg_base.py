@@ -10,6 +10,8 @@ docs/superpowers/specs/2026-07-11-ontokg-reference-schema-design.md.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 CATEGORIES = [
     "Person", "Organization", "Work", "Place",
     "Science", "Event", "Knowledge", "Product",
@@ -216,3 +218,52 @@ def build_mapping_md() -> str:
         for tag, cats, typ, auth, rep in rows
     )
     return header + body + "\n"
+
+
+_HERE = Path(__file__).resolve().parent
+_TTL_PATH = _HERE / "ontokg-base.ttl"
+_MD_PATH = _HERE / "ontokg-mapping.md"
+
+
+def validate(ttl_path: str | Path = _TTL_PATH) -> dict:
+    """Round-trip the TTL through mykg's parse_base_schema and assert structure."""
+    from mykg.base_schema import parse_base_schema
+
+    parsed = parse_base_schema(Path(ttl_path).read_text())
+    lc, lp = parsed["locked_classes"], parsed["locked_properties"]
+
+    assert "Entity" in lc, "missing synthetic root :Entity"
+    for cat in CATEGORIES:
+        assert lc.get(cat, {}).get("parent") == "Entity", f"category {cat} not under :Entity"
+    for tag, (cls, parent) in INTRINSIC.items():
+        assert lc.get(cls, {}).get("parent") == parent, f"intrinsic {cls} not ⊑ {parent}"
+    for tag, (auth, domains) in RELATIONAL.items():
+        assert lp.get(tag, {}).get("range") == "Entity", f"relational {tag} range != :Entity"
+    assert not (set(lc) & set(lp)), "a name is both a class and a property"
+
+    print(
+        f"OK — {len(CATEGORIES)} categories, {len(INTRINSIC)} intrinsic subclasses, "
+        f"{len(RELATIONAL)} relational properties "
+        f"({len(lc)} locked classes incl. :Entity, {len(lp)} locked properties)."
+    )
+    return parsed
+
+
+def main(argv=None) -> int:
+    import argparse
+
+    ap = argparse.ArgumentParser(description="Generate or validate the OntoKG reference schema.")
+    ap.add_argument("--generate", action="store_true",
+                    help="rewrite ontokg-base.ttl and ontokg-mapping.md from VOCAB")
+    args = ap.parse_args(argv)
+
+    if args.generate:
+        _TTL_PATH.write_text(build_ttl())
+        _MD_PATH.write_text(build_mapping_md())
+        print(f"Wrote {_TTL_PATH.name} and {_MD_PATH.name}.")
+    validate()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
