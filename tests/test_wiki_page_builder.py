@@ -47,6 +47,32 @@ def test_render_entity_page_has_valid_frontmatter():
     assert "Alice works at [[org-acme|Acme]]." in page
 
 
+def test_nested_smuggled_wikilink_is_fully_stripped():
+    md = "reports to [[bad-wrapper|[[secret-invented-id]]]] ok"
+    cleaned, dropped = strip_invalid_wikilinks(md, set())
+    # No live wikilink of any kind survives -- the invariant under test.
+    # (The bare id may remain as inert plain text, same as any other
+    # invalid target with no label; that is not a link.)
+    assert "[[" not in cleaned
+    assert "[[secret-invented-id" not in cleaned
+    assert "bad-wrapper" in dropped
+    assert "secret-invented-id" in dropped
+
+
+def test_empty_label_wikilink_is_stripped():
+    md = "See [[unknown-id|]] here."
+    cleaned, dropped = strip_invalid_wikilinks(md, set())
+    assert "[[" not in cleaned
+    assert "unknown-id" in dropped
+
+
+def test_wikilink_with_bracket_in_label_is_stripped():
+    md = "see [[unknown|La]bel]] end"
+    cleaned, dropped = strip_invalid_wikilinks(md, set())
+    assert "[[unknown" not in cleaned
+    assert "unknown" in dropped
+
+
 def test_stub_page_flags_ungrounded():
     page = render_stub_page(_node(grounded=False), [Neighbor(
         id="org-acme", name="Acme", type="Organization",

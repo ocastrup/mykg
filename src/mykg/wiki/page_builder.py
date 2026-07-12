@@ -7,24 +7,31 @@ import yaml
 
 from mykg.wiki.loader import Neighbor, WikiNode
 
-_WIKILINK = re.compile(r"\[\[([^\]|]+?)(?:\|([^\]]+))?\]\]")
+_WIKILINK = re.compile(r"\[\[(.*?)\]\]", re.DOTALL)
 
 
 def strip_invalid_wikilinks(markdown: str, allowed_ids: set[str]) -> tuple[str, list[str]]:
     """Keep only [[id]] / [[id|label]] whose id is in allowed_ids; others become plain text.
 
+    Runs to a fixed point so an invalid link whose label contains nested
+    bracket syntax cannot reconstruct a live wikilink after one pass.
     Returns (cleaned_markdown, dropped_ids_in_order).
     """
     dropped: list[str] = []
 
     def _sub(m: re.Match) -> str:
-        target, label = m.group(1).strip(), m.group(2)
+        target, sep, label = m.group(1).partition("|")
+        target = target.strip()
         if target in allowed_ids:
             return m.group(0)
         dropped.append(target)
-        return (label or target).strip()
+        return (label if sep else target).strip()
 
-    return _WIKILINK.sub(_sub, markdown), dropped
+    text, prev = markdown, None
+    while prev != text:
+        prev = text
+        text = _WIKILINK.sub(_sub, text)
+    return text, dropped
 
 
 def _frontmatter(node: WikiNode) -> str:
