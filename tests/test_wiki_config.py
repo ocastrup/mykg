@@ -7,7 +7,6 @@ import yaml
 
 ROOT = Path(__file__).parent.parent
 WIKI_KEYS = {
-    "vault_dir",
     "max_workers",
     "min_attr_confidence",
     "min_edge_confidence",
@@ -40,9 +39,30 @@ def test_root_and_packaged_wiki_blocks_match():
 def test_config_exposes_wiki_constants():
     import mykg.config as c
 
-    assert isinstance(c.WIKI_VAULT_DIR, str)
     assert isinstance(c.WIKI_MAX_WORKERS, int)
     assert isinstance(c.WIKI_MIN_ATTR_CONFIDENCE, float)
     assert isinstance(c.WIKI_MIN_EDGE_CONFIDENCE, float)
     assert isinstance(c.WIKI_MAX_GROUNDING_TOKENS, int)
     assert isinstance(c.WIKI_NEIGHBORS_MAX, int)
+
+
+def test_top_level_paths_block_is_profile_independent():
+    """sessions_root / wiki_root live in a top-level `paths:` block (not inside
+    any profile), so switching `profile:` never changes where data lives."""
+    for rel in ("mykg_config.yaml", "src/mykg/data/mykg_config.yaml"):
+        raw = yaml.safe_load((ROOT / rel).read_text())
+        assert "paths" in raw, f"{rel}: missing top-level paths block"
+        assert set(raw["paths"]) == {"sessions_root", "wiki_root"}, rel
+        # And no profile should reintroduce the old per-profile keys.
+        for name, prof in raw.get("profiles", {}).items():
+            paths = prof.get("pipeline", {}).get("paths", {})
+            assert "sessions_dir" not in paths, f"{rel}:{name} still has sessions_dir"
+            wiki = prof.get("pipeline", {}).get("wiki", {})
+            assert "vault_dir" not in wiki, f"{rel}:{name} still has wiki.vault_dir"
+
+
+def test_config_exposes_top_level_path_constants():
+    import mykg.config as c
+
+    assert isinstance(c.SESSIONS_DIR, str) and c.SESSIONS_DIR
+    assert isinstance(c.WIKI_ROOT, str) and c.WIKI_ROOT

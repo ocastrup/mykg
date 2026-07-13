@@ -46,10 +46,11 @@ def test_build_wiki_missing_session_errors(tmp_path):
 def test_build_wiki_writes_vault(tmp_path):
     _session(tmp_path, "sess1")
     with patch("mykg.cli._sessions_root", return_value=tmp_path), \
+         patch("mykg.config.WIKI_ROOT", str(tmp_path / "wiki")), \
          patch("mykg.llm.config.load_adapter", return_value=_StubAdapter()):
         res = CliRunner().invoke(cli, ["build-wiki", "sess1"])
     assert res.exit_code == 0, res.output
-    vault = tmp_path / "sess1" / "wiki_vault"
+    vault = tmp_path / "wiki" / "sess1"
     assert (vault / "entities" / "person-x.md").exists()
     assert (vault / "Home.md").exists()
     # Extract session state must be untouched by the wiki run.

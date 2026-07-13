@@ -94,7 +94,7 @@ From the user's `/mykg <free text>` message extract:
 2. **Input dir** — the path the user named, or `.` if they said "this folder", or absent for session-only commands (including `query`).
 3. **Session** — **default: do not pass `--session` at all** so mykg auto-creates a fresh timestamped session. Only override the default when the current user message contains an explicit reuse signal (see "Default behaviour" above). Resolution order:
    1. **Literal session name.** User typed `--session <name>` or "session <name>" → use that exact name.
-   2. **Explicit reuse verb / phrase.** User said one of: **resume**, **continue**, **redo**, **append**, **approve**, **walkthrough**, **query**, **"the last session"**, **"the existing session"**, **"the same session"** → auto-detect the most-recent session: list `$SESSIONS_DIR` (read `sessions_dir` from `mykg_config.yaml`, default `mykg_sessions`), sort by mtime, pick newest.
+   2. **Explicit reuse verb / phrase.** User said one of: **resume**, **continue**, **redo**, **append**, **approve**, **walkthrough**, **query**, **"the last session"**, **"the existing session"**, **"the same session"** → auto-detect the most-recent session: list `$SESSIONS_DIR` (read top-level `sessions_root` from `mykg_config.yaml`, default `mykg_sessions`), sort by mtime, pick newest.
    3. **Reuse-implying flag.** User specified `--append` or `--from-step <step>` → auto-detect-most-recent (these flags only make sense against an existing session).
    4. **Session-only verb.** Verb is `approve-schema`, `walkthrough`, or `query` → auto-detect-most-recent. (`query` is read-only and always operates against an existing session.)
    5. **Otherwise.** Do NOT pass `--session`. mykg creates a fresh session. This is the path for bare `/mykg <dir>`, `/mykg extract <dir>`, `/mykg extract more from <dir>`, "extract this folder", etc.
@@ -239,7 +239,7 @@ Three execution paths depending on the subcommand the parser landed on.
 For a fresh run:
 
 ```bash
-SESSIONS_DIR=$(grep -E '^\s+sessions_dir:' mykg_config.yaml | head -1 | awk '{print $2}' || echo sessions)
+SESSIONS_DIR=$(grep -E '^\s*sessions_root:' mykg_config.yaml | head -1 | awk '{print $2}' || echo mykg_sessions)
 mkdir -p "$SESSIONS_DIR"
 
 nohup uv run mykg extract-graph "$INPUT_DIR" $EXTRA_FLAGS \

@@ -25,8 +25,9 @@ def session_root(ctx: PipelineContext) -> Path:
 
 
 def vault_dir(ctx: PipelineContext) -> Path:
-    configured = Path(cfg.WIKI_VAULT_DIR)
-    return configured if configured.is_absolute() else session_root(ctx) / configured
+    # Each session's wiki lives under the top-level wiki root, keyed by session
+    # name: <wiki_root>/<session-name>/. A relative wiki_root resolves from cwd.
+    return Path(cfg.WIKI_ROOT) / session_root(ctx).name
 
 
 def _graph_path(ctx: PipelineContext) -> Path:

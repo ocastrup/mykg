@@ -59,7 +59,8 @@ def _ctx(root: Path) -> PipelineContext:
                            intermediate_dir=wiki_state, adapter=_StubAdapter())
 
 
-def test_full_pipeline_writes_vault(tmp_path):
+def test_full_pipeline_writes_vault(tmp_path, monkeypatch):
+    monkeypatch.setattr("mykg.config.WIKI_ROOT", str(tmp_path / "wiki"))
     root = _session(tmp_path)
     ctx = _ctx(root)
     for step in (run_wiki_load, run_wiki_pages, run_wiki_hubs, run_wiki_index):
@@ -74,7 +75,8 @@ def test_full_pipeline_writes_vault(tmp_path):
     assert (vault / ".wiki_manifest.json").exists()
 
 
-def test_incremental_second_run_regenerates_nothing(tmp_path):
+def test_incremental_second_run_regenerates_nothing(tmp_path, monkeypatch):
+    monkeypatch.setattr("mykg.config.WIKI_ROOT", str(tmp_path / "wiki"))
     root = _session(tmp_path)
     ctx = _ctx(root)
     run_wiki_load(ctx)

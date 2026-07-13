@@ -143,7 +143,6 @@ NEO4J_CSV_ENABLED: bool = _get_opt("export", "neo4j_csv_enabled", False)
 NEO4J_CSV_DIR: str = _get_opt("export", "neo4j_csv_dir", "neo4j_csv")
 
 # Wiki (build-wiki command) — optional; defaults apply when a profile omits `wiki:`
-WIKI_VAULT_DIR: str = _get_opt("wiki", "vault_dir", "wiki_vault")
 WIKI_MAX_WORKERS: int = int(_get_opt("wiki", "max_workers", 4))
 WIKI_MIN_ATTR_CONFIDENCE: float = float(_get_opt("wiki", "min_attr_confidence", 0.3))
 WIKI_MIN_EDGE_CONFIDENCE: float = float(_get_opt("wiki", "min_edge_confidence", 0.3))
@@ -155,7 +154,12 @@ WIKI_NEIGHBORS_MAX: int = int(_get_opt("wiki", "neighbors_max", 25))
 # ---------------------------------------------------------------------------
 OUTPUT_DIR: str = _get("paths", "output_dir")
 INTERMEDIATE_DIR: str = _get("paths", "intermediate_dir")
-SESSIONS_DIR: str = _get("paths", "sessions_dir")
+
+# User/environment bootstrap — top-level `paths:` block, independent of the
+# active profile (switching `profile:` never changes where your data lives).
+_user_paths = RAW["paths"]
+SESSIONS_DIR: str = _user_paths["sessions_root"]
+WIKI_ROOT: str = _user_paths["wiki_root"]
 
 # ---------------------------------------------------------------------------
 # Name normalization — Step 6b (D29)
