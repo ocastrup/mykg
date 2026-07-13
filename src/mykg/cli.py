@@ -839,20 +839,14 @@ def build_topics(session, rebuild, from_step, log_file, verbose):
     logging.getLogger(__name__).info("Command: %s", " ".join(sys.argv))
 
     step_names = [s.name for s in TOPIC_STEPS]
-    if from_step:
-        if from_step not in step_names:
-            raise click.ClickException(
-                f"--from-step must be one of {step_names}, got '{from_step}'."
-            )
-        start = step_names.index(from_step)
-        for name in step_names[start:]:
-            (topics_state / f"{name}.done").unlink(missing_ok=True)
-        if from_step == "topics_load":
-            (topics_state / "wiki_graph.json").unlink(missing_ok=True)
-    else:
-        for name in step_names:
-            (topics_state / f"{name}.done").unlink(missing_ok=True)
-        (topics_state / "wiki_graph.json").unlink(missing_ok=True)
+    if from_step and from_step not in step_names:
+        raise click.ClickException(
+            f"--from-step must be one of {step_names}, got '{from_step}'."
+        )
+    start = step_names.index(from_step) if from_step else 0
+    for step in TOPIC_STEPS[start:]:
+        for output in step.outputs:
+            (topics_state / output).unlink(missing_ok=True)
 
     adapter = load_adapter(intermediate_dir=topics_state)
     ctx = PipelineContext(
