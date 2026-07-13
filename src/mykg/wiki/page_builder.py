@@ -1,6 +1,7 @@
 """Pure rendering primitives for wiki pages: link validation + markdown assembly."""
 from __future__ import annotations
 
+import logging
 import re
 
 import yaml
@@ -8,6 +9,8 @@ import yaml
 from mykg.chunker import count_tokens
 from mykg.llm.adapter import LLMAdapter
 from mykg.wiki.loader import Neighbor, WikiGraph, WikiNode
+
+log = logging.getLogger(__name__)
 
 _WIKILINK = re.compile(r"\[\[(.*?)\]\]", re.DOTALL)
 
@@ -53,9 +56,17 @@ def render_entity_page(node: WikiNode, body_markdown: str) -> str:
     return _frontmatter(node) + body_markdown.strip() + "\n"
 
 
-def render_stub_page(node: WikiNode, neighbors: list[Neighbor]) -> str:
-    """Minimal, never-fabricated page for nodes with no resolvable grounding."""
-    lines = [f"# {node.name}", "", f"*{node.type}. No source text was available to summarize.*"]
+def render_stub_page(
+    node: WikiNode, neighbors: list[Neighbor], reason: str | None = None
+) -> str:
+    """Minimal, never-fabricated page for nodes with no resolvable grounding
+    (or, when reason="generation_failed", for a grounded node whose LLM
+    summary generation failed transiently)."""
+    if reason == "generation_failed":
+        note = f"*{node.type}. Automated summary generation failed; showing known links only.*"
+    else:
+        note = f"*{node.type}. No source text was available to summarize.*"
+    lines = [f"# {node.name}", "", note]
     if neighbors:
         lines += ["", "## Connections", ""]
         lines += [f"- [[{n.id}|{n.name}]] ({n.relationship})" for n in neighbors]
@@ -110,20 +121,30 @@ def build_entity_prompt(node: WikiNode, neighbors: list[Neighbor],
 
 
 def generate_entity_page(node: WikiNode, neighbors: list[Neighbor], adapter: LLMAdapter,
-                         min_attr_confidence: float, max_grounding_tokens: int) -> str:
+                         min_attr_confidence: float, max_grounding_tokens: int
+                         ) -> tuple[str, bool]:
+    """Render an entity's wiki page.
+
+    Returns (page, generated_ok). generated_ok is True when the result is a
+    final/stable outcome (success, or a legitimate stub for an ungrounded
+    node) and False only when generation failed transiently (adapter raised,
+    or returned a blank reply) — callers should treat False as retryable.
+    """
     if not node.grounded:
-        return render_stub_page(node, neighbors)
+        return render_stub_page(node, neighbors), True
     system, user = build_entity_prompt(node, neighbors, min_attr_confidence, max_grounding_tokens)
     try:
         raw = adapter.complete(system, user, context_label=f"wiki:{node.id}")
     except Exception:
-        return render_stub_page(node, neighbors)
+        log.warning("wiki: entity generation failed for %s; using stub", node.id, exc_info=True)
+        return render_stub_page(node, neighbors, reason="generation_failed"), False
     body = LLMAdapter.strip_code_fences(raw).strip() if raw else ""
     if not body:
-        return render_stub_page(node, neighbors)
+        log.warning("wiki: blank LLM reply for %s; using stub", node.id)
+        return render_stub_page(node, neighbors, reason="generation_failed"), False
     allowed = {n.id for n in neighbors}
     cleaned, _dropped = strip_invalid_wikilinks(body, allowed)
-    return render_entity_page(node, cleaned)
+    return render_entity_page(node, cleaned), True
 
 
 def extract_lead(page_markdown: str) -> str:

@@ -120,8 +120,9 @@ def test_prompt_drops_low_confidence_attributes():
 def test_generate_strips_invented_links_and_wraps():
     node, nb = _alice_and_neighbor()
     reply = "## Alice\n\nWorks at [[org-acme|Acme]] with [[person-ghost|Ghost]]."
-    page = generate_entity_page(node, nb, _StubAdapter(reply),
-                                min_attr_confidence=0.3, max_grounding_tokens=4000)
+    page, ok = generate_entity_page(node, nb, _StubAdapter(reply),
+                                    min_attr_confidence=0.3, max_grounding_tokens=4000)
+    assert ok is True
     assert "[[org-acme|Acme]]" in page
     assert "person-ghost" not in page
     assert page.startswith("---\n")
@@ -129,12 +130,32 @@ def test_generate_strips_invented_links_and_wraps():
 
 def test_blank_reply_falls_back_to_stub():
     node, nb = _alice_and_neighbor()
-    page = generate_entity_page(node, nb, _StubAdapter("   "),
-                                min_attr_confidence=0.3, max_grounding_tokens=4000)
+    page, ok = generate_entity_page(node, nb, _StubAdapter("   "),
+                                    min_attr_confidence=0.3, max_grounding_tokens=4000)
+    assert ok is False
     fm = yaml.safe_load(page.split("---\n")[1])
     assert fm["grounded"] is True             # node had grounding...
     assert fm["mykg_id"] == "person-alice"
     assert "## Connections" in page
+    assert "[[org-acme|Acme]] (works_at)" in page
+    assert "Automated summary generation failed" in page
+    assert "No source text was available to summarize" not in page
+
+
+class _RaisingAdapter:
+    def complete(self, system, user, context_label="", max_tokens=None, timeout=None):
+        raise RuntimeError("adapter unavailable")
+
+
+def test_adapter_exception_falls_back_to_stub_and_does_not_propagate():
+    node, nb = _alice_and_neighbor()
+    page, ok = generate_entity_page(node, nb, _RaisingAdapter(),
+                                    min_attr_confidence=0.3, max_grounding_tokens=4000)
+    assert ok is False
+    fm = yaml.safe_load(page.split("---\n")[1])
+    assert fm["grounded"] is True
+    assert fm["mykg_id"] == "person-alice"
+    assert "Automated summary generation failed" in page
     assert "[[org-acme|Acme]] (works_at)" in page
 
 

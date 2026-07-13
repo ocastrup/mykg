@@ -58,22 +58,26 @@ def run_wiki_pages(ctx: PipelineContext) -> None:
     for nid in plan.to_delete:
         (entities / f"{nid}.md").unlink(missing_ok=True)
 
-    def _one(nid: str) -> None:
+    def _one(nid: str) -> tuple[str, bool]:
         node = graph.nodes[nid]
         nb = graph.neighbors(nid, cfg.WIKI_MIN_EDGE_CONFIDENCE, cfg.WIKI_NEIGHBORS_MAX)
-        page = generate_entity_page(node, nb, ctx.adapter,
-                                    cfg.WIKI_MIN_ATTR_CONFIDENCE, cfg.WIKI_MAX_GROUNDING_TOKENS)
+        page, ok = generate_entity_page(node, nb, ctx.adapter,
+                                        cfg.WIKI_MIN_ATTR_CONFIDENCE, cfg.WIKI_MAX_GROUNDING_TOKENS)
         (entities / f"{nid}.md").write_text(page, encoding="utf-8")
+        return nid, ok
 
+    failed: set[str] = set()
     if plan.to_generate:
         with ThreadPoolExecutor(max_workers=cfg.WIKI_MAX_WORKERS) as pool:
-            list(pool.map(_one, plan.to_generate))
+            for nid, ok in pool.map(_one, plan.to_generate):
+                if not ok:
+                    failed.add(nid)
 
     hashes = {
         nid: grounding_hash(graph.nodes[nid],
                             graph.neighbors(nid, cfg.WIKI_MIN_EDGE_CONFIDENCE,
                                             cfg.WIKI_NEIGHBORS_MAX))
-        for nid in graph.nodes
+        for nid in graph.nodes if nid not in failed
     }
     save_manifest(vault, hashes)
     (ctx.intermediate_dir / "wiki_pages.done").write_text("ok")
