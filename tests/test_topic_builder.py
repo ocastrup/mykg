@@ -16,6 +16,14 @@ class _StubAdapter:
         return "stub"
 
 
+class _RaisingAdapter:
+    def complete(self, system, user, context_label="", max_tokens=None, timeout=None):
+        raise RuntimeError("adapter error")
+
+    def endpoint_label(self):
+        return "raising"
+
+
 def _node(nid: str) -> WikiNode:
     return WikiNode(id=nid, type="Thing", name=nid.title(), attributes={},
                     source_files=[], grounded_chunk_keys=[f"{nid}.md::1"],
@@ -60,3 +68,12 @@ def test_generate_topic_page_blank_reply_is_transient_failure():
     slug, page, ok = generate_topic_page(comm, _graph(), _StubAdapter(""),
                                          members_max=25, max_grounding_tokens=4000)
     assert ok is False
+
+
+def test_generate_topic_page_adapter_raises_is_transient_failure():
+    comm = Community(topic_id="t0001", member_ids=["a", "b", "c"])
+    slug, page, ok = generate_topic_page(comm, _graph(), _RaisingAdapter(),
+                                         members_max=25, max_grounding_tokens=4000)
+    assert ok is False
+    assert slug == ""
+    assert page == ""
