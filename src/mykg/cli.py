@@ -810,6 +810,64 @@ def build_wiki(session, rebuild, from_step, log_file, verbose):
     click.echo(f"Wiki written to {vault_dir(ctx)}")
 
 
+@cli.command("build-topics")
+@click.argument("session")
+@click.option("--rebuild", is_flag=True, help="Force-regenerate every topic page (ignore manifest)")
+@click.option("--from-step", default=None, help="Resume from a topics step (topics_cluster, ...)")
+@click.option("--log-file", default=None, type=click.Path(path_type=Path))
+@click.option("--verbose", "-v", is_flag=True)
+def build_topics(session, rebuild, from_step, log_file, verbose):
+    """Cluster a finished session's graph and synthesize cross-entity topic pages."""
+    from mykg.llm.config import load_adapter
+    from mykg.logging import setup
+    from mykg.orchestrator import PipelineContext, run
+    from mykg.topics_pipeline import TOPIC_STEPS, vault_dir
+
+    session_root = _sessions_root() / session
+    if not session_root.is_dir():
+        raise click.ClickException(f"Session '{session}' not found at {session_root}.")
+    if not (session_root / "output" / "nodes.jsonl").exists():
+        raise click.ClickException(
+            f"Session '{session}' has no output/nodes.jsonl — run extract-graph first."
+        )
+
+    topics_state = session_root / "topics_state"
+    topics_state.mkdir(parents=True, exist_ok=True)
+    if log_file is None:
+        log_file = session_root / "topics.log"
+    setup(log_file=log_file, verbose=verbose)
+    logging.getLogger(__name__).info("Command: %s", " ".join(sys.argv))
+
+    step_names = [s.name for s in TOPIC_STEPS]
+    if from_step:
+        if from_step not in step_names:
+            raise click.ClickException(
+                f"--from-step must be one of {step_names}, got '{from_step}'."
+            )
+        start = step_names.index(from_step)
+        for name in step_names[start:]:
+            (topics_state / f"{name}.done").unlink(missing_ok=True)
+        if from_step == "topics_load":
+            (topics_state / "wiki_graph.json").unlink(missing_ok=True)
+    else:
+        for name in step_names:
+            (topics_state / f"{name}.done").unlink(missing_ok=True)
+        (topics_state / "wiki_graph.json").unlink(missing_ok=True)
+
+    adapter = load_adapter(intermediate_dir=topics_state)
+    ctx = PipelineContext(
+        input_dir=session_root / "input",
+        output_dir=session_root / "output",
+        intermediate_dir=topics_state,
+        adapter=adapter,
+    )
+    if rebuild:
+        (vault_dir(ctx) / ".topics_manifest.json").unlink(missing_ok=True)
+
+    run(TOPIC_STEPS, ctx)
+    click.echo(f"Topics written to {vault_dir(ctx)}")
+
+
 @cli.command("approve-schema")
 @click.option("--intermediate-dir", default=None, type=click.Path(path_type=Path))
 @click.option("--log-file", default=None, type=click.Path(path_type=Path))
