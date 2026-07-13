@@ -141,6 +141,11 @@ profiles:
         min_edge_confidence: 0.3    # drop links (and neighbor context) below this
         max_grounding_tokens: 4000  # cap source-chunk text fed per page
         neighbors_max: 25           # cap 1-hop neighbor list per page
+      topics:
+        resolution: 1.0     # greedy-modularity resolution (higher -> more, smaller communities)
+        min_size: 3         # communities smaller than this get no topic page
+        members_max: 25     # max members grounded into a topic prompt
+        enabled: true       # reserved gate; build-topics is already opt-in via the command
       # --- Pipeline infrastructure --------------------------------------------
       error_gate:               # circuit-breaker: pauses the run when too many API errors accumulate
         enabled: false          # set false for fully unattended runs (e.g. providers with no rate limits)
@@ -283,6 +288,11 @@ profiles:
         min_edge_confidence: 0.3    # drop links (and neighbor context) below this
         max_grounding_tokens: 4000  # cap source-chunk text fed per page
         neighbors_max: 25           # cap 1-hop neighbor list per page
+      topics:
+        resolution: 1.0     # greedy-modularity resolution (higher -> more, smaller communities)
+        min_size: 3         # communities smaller than this get no topic page
+        members_max: 25     # max members grounded into a topic prompt
+        enabled: true       # reserved gate; build-topics is already opt-in via the command
       # --- Pipeline infrastructure --------------------------------------------
       error_gate:
         enabled: false
@@ -422,6 +432,11 @@ profiles:
         min_edge_confidence: 0.3    # drop links (and neighbor context) below this
         max_grounding_tokens: 4000  # cap source-chunk text fed per page
         neighbors_max: 25           # cap 1-hop neighbor list per page
+      topics:
+        resolution: 1.0     # greedy-modularity resolution (higher -> more, smaller communities)
+        min_size: 3         # communities smaller than this get no topic page
+        members_max: 25     # max members grounded into a topic prompt
+        enabled: true       # reserved gate; build-topics is already opt-in via the command
       # --- Pipeline infrastructure --------------------------------------------
       error_gate:               # circuit-breaker: pauses the run when too many API errors accumulate
         enabled: false
@@ -570,6 +585,11 @@ profiles:
         min_edge_confidence: 0.3    # drop links (and neighbor context) below this
         max_grounding_tokens: 4000  # cap source-chunk text fed per page
         neighbors_max: 25           # cap 1-hop neighbor list per page
+      topics:
+        resolution: 1.0     # greedy-modularity resolution (higher -> more, smaller communities)
+        min_size: 3         # communities smaller than this get no topic page
+        members_max: 25     # max members grounded into a topic prompt
+        enabled: true       # reserved gate; build-topics is already opt-in via the command
       # --- Pipeline infrastructure --------------------------------------------
       error_gate:
         enabled: false
@@ -712,6 +732,11 @@ profiles:
         min_edge_confidence: 0.3    # drop links (and neighbor context) below this
         max_grounding_tokens: 4000  # cap source-chunk text fed per page
         neighbors_max: 25           # cap 1-hop neighbor list per page
+      topics:
+        resolution: 1.0     # greedy-modularity resolution (higher -> more, smaller communities)
+        min_size: 3         # communities smaller than this get no topic page
+        members_max: 25     # max members grounded into a topic prompt
+        enabled: true       # reserved gate; build-topics is already opt-in via the command
       # --- Pipeline infrastructure --------------------------------------------
       error_gate:
         enabled: false
@@ -855,6 +880,11 @@ profiles:
         min_edge_confidence: 0.3    # drop links (and neighbor context) below this
         max_grounding_tokens: 4000  # cap source-chunk text fed per page
         neighbors_max: 25           # cap 1-hop neighbor list per page
+      topics:
+        resolution: 1.0     # greedy-modularity resolution (higher -> more, smaller communities)
+        min_size: 3         # communities smaller than this get no topic page
+        members_max: 25     # max members grounded into a topic prompt
+        enabled: true       # reserved gate; build-topics is already opt-in via the command
       # --- Pipeline infrastructure --------------------------------------------
       error_gate:
         enabled: false
@@ -988,6 +1018,11 @@ profiles:
         min_edge_confidence: 0.3    # drop links (and neighbor context) below this
         max_grounding_tokens: 4000  # cap source-chunk text fed per page
         neighbors_max: 25           # cap 1-hop neighbor list per page
+      topics:
+        resolution: 1.0     # greedy-modularity resolution (higher -> more, smaller communities)
+        min_size: 3         # communities smaller than this get no topic page
+        members_max: 25     # max members grounded into a topic prompt
+        enabled: true       # reserved gate; build-topics is already opt-in via the command
       error_gate:
         enabled: false
         threshold: 3

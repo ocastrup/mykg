@@ -149,6 +149,12 @@ WIKI_MIN_EDGE_CONFIDENCE: float = float(_get_opt("wiki", "min_edge_confidence", 
 WIKI_MAX_GROUNDING_TOKENS: int = int(_get_opt("wiki", "max_grounding_tokens", 4000))
 WIKI_NEIGHBORS_MAX: int = int(_get_opt("wiki", "neighbors_max", 25))
 
+# Topics (build-topics command) — optional; defaults apply when a profile omits `topics:`
+TOPICS_RESOLUTION: float = float(_get_opt("topics", "resolution", 1.0))
+TOPICS_MIN_SIZE: int = int(_get_opt("topics", "min_size", 3))
+TOPICS_MEMBERS_MAX: int = int(_get_opt("topics", "members_max", 25))
+TOPICS_ENABLED: bool = bool(_get_opt("topics", "enabled", True))
+
 # ---------------------------------------------------------------------------
 # Output / intermediate paths (D16, D18)
 # ---------------------------------------------------------------------------
