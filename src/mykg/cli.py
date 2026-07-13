@@ -752,6 +752,64 @@ def extract_graph(
         )
 
 
+@cli.command("build-wiki")
+@click.argument("session")
+@click.option("--rebuild", is_flag=True, help="Force-regenerate every page (ignore manifest)")
+@click.option("--from-step", default=None, help="Resume from a wiki step (wiki_pages, ...)")
+@click.option("--log-file", default=None, type=click.Path(path_type=Path))
+@click.option("--verbose", "-v", is_flag=True)
+def build_wiki(session, rebuild, from_step, log_file, verbose):
+    """Render a graph-grounded Obsidian prose vault from a finished session."""
+    from mykg.llm.config import load_adapter
+    from mykg.logging import setup
+    from mykg.orchestrator import PipelineContext, run
+    from mykg.wiki_pipeline import WIKI_STEPS, vault_dir
+
+    session_root = _sessions_root() / session
+    if not session_root.is_dir():
+        raise click.ClickException(f"Session '{session}' not found at {session_root}.")
+    if not (session_root / "output" / "nodes.jsonl").exists():
+        raise click.ClickException(
+            f"Session '{session}' has no output/nodes.jsonl — run extract-graph first."
+        )
+
+    wiki_state = session_root / "wiki"
+    wiki_state.mkdir(parents=True, exist_ok=True)
+    if log_file is None:
+        log_file = session_root / "wiki.log"
+    setup(log_file=log_file, verbose=verbose)
+    logging.getLogger(__name__).info("Command: %s", " ".join(sys.argv))
+
+    wiki_step_names = [s.name for s in WIKI_STEPS]
+    if from_step:
+        if from_step not in wiki_step_names:
+            raise click.ClickException(
+                f"--from-step must be one of {wiki_step_names}, got '{from_step}'."
+            )
+        start = wiki_step_names.index(from_step)
+        for name in wiki_step_names[start:]:
+            (wiki_state / f"{name}.done").unlink(missing_ok=True)
+        if from_step == "wiki_load":
+            (wiki_state / "wiki_graph.json").unlink(missing_ok=True)
+    else:
+        for name in wiki_step_names:
+            (wiki_state / f"{name}.done").unlink(missing_ok=True)
+        (wiki_state / "wiki_graph.json").unlink(missing_ok=True)
+
+    adapter = load_adapter(intermediate_dir=wiki_state)
+    ctx = PipelineContext(
+        input_dir=session_root / "input",
+        output_dir=session_root / "output",
+        intermediate_dir=wiki_state,
+        adapter=adapter,
+    )
+    if rebuild:
+        (vault_dir(ctx) / ".wiki_manifest.json").unlink(missing_ok=True)
+
+    run(WIKI_STEPS, ctx)
+    click.echo(f"Wiki written to {vault_dir(ctx)}")
+
+
 @cli.command("approve-schema")
 @click.option("--intermediate-dir", default=None, type=click.Path(path_type=Path))
 @click.option("--log-file", default=None, type=click.Path(path_type=Path))
