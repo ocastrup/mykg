@@ -47,3 +47,54 @@ def test_subthreshold_edges_dropped():
     comms = build_communities(g, min_edge_confidence=0.3, resolution=1.0, min_size=3)
     # low-confidence bridge ignored -> still two separate triangles
     assert len(comms.communities) == 2
+
+
+def test_parallel_edges_collapse_to_max_confidence():
+    # Graph with two edges on the same node pair (a-b) with different confidences.
+    # The lower-confidence edge is below threshold; the higher-confidence edge is above.
+    # When both are in the edge list, max() collapse keeps the higher confidence,
+    # so the pair stays connected despite the low-confidence edge.
+    ids = ["a", "b", "c"]
+    nodes = {i: _node(i) for i in ids}
+    edges = [
+        WikiEdge(id="low", type="rel", from_id="a", to_id="b", confidence=0.2),
+        WikiEdge(id="high", type="rel", from_id="a", to_id="b", confidence=0.8),
+        WikiEdge(id="e2", type="rel", from_id="b", to_id="c", confidence=0.9),
+    ]
+    g = WikiGraph(nodes=nodes, edges=edges, types=["Thing"])
+
+    # With min_edge_confidence=0.5:
+    # - low edge (0.2) is dropped by threshold filter
+    # - high edge (0.8) is kept, creating a-b with weight 0.8
+    # - e2 (0.9) is kept, creating b-c with weight 0.9
+    # Result: a-b-c form one connected component
+    comms = build_communities(g, min_edge_confidence=0.5, resolution=1.0, min_size=2)
+
+    members = [set(c.member_ids) for c in comms.communities]
+    # All three nodes should be in the same community (connected via max-collapsed edge)
+    assert {"a", "b", "c"} in members
+    assert len(comms.communities) == 1
+
+
+def test_all_edges_below_threshold_yields_all_singletons():
+    # Graph where every edge has confidence strictly below the threshold.
+    # All edges are dropped by the threshold filter, leaving only isolated nodes.
+    # With min_size=1, each node becomes its own singleton community.
+    ids = ["a", "b", "c", "d"]
+    nodes = {i: _node(i) for i in ids}
+    edges = [
+        WikiEdge(id="e1", type="rel", from_id="a", to_id="b", confidence=0.1),
+        WikiEdge(id="e2", type="rel", from_id="b", to_id="c", confidence=0.1),
+        WikiEdge(id="e3", type="rel", from_id="c", to_id="d", confidence=0.1),
+    ]
+    g = WikiGraph(nodes=nodes, edges=edges, types=["Thing"])
+
+    # With min_edge_confidence=0.5, all edges (confidence 0.1) are dropped.
+    # No edges remain -> each node is isolated.
+    # With min_size=1, all 4 singleton communities are kept.
+    comms = build_communities(g, min_edge_confidence=0.5, resolution=1.0, min_size=1)
+
+    assert len(comms.communities) == 4
+    # Each community should have exactly one member (the isolated node itself)
+    for comm in comms.communities:
+        assert len(comm.member_ids) == 1
