@@ -63,3 +63,35 @@ def test_render_proposals_md_is_grounded():
     assert "founded in 1998" in md
     assert "sess1" in md
     assert "Propose-only" in md
+
+
+def test_extract_proposals_malformed_json_returns_empty():
+    """extract_proposals returns [] when LLM returns invalid JSON or non-array."""
+    comm = Community(topic_id="t0001", member_ids=["o"])
+
+    # Test non-JSON string
+    props = extract_proposals(comm, _graph(), {"Organization": ["name"]},
+                              _StubAdapter("not valid json at all"), max_grounding_tokens=4000)
+    assert props == []
+
+    # Test valid JSON but not an array (object instead)
+    props = extract_proposals(comm, _graph(), {"Organization": ["name"]},
+                              _StubAdapter('{"kind": "add_attribute"}'), max_grounding_tokens=4000)
+    assert props == []
+
+
+class _ErrorAdapter:
+    """Adapter that raises an exception on complete()."""
+    def complete(self, system, user, context_label="", max_tokens=None, timeout=None):
+        raise RuntimeError("adapter error")
+
+    def endpoint_label(self):
+        return "error"
+
+
+def test_extract_proposals_adapter_raises_returns_empty():
+    """extract_proposals returns [] and does not raise when adapter fails."""
+    comm = Community(topic_id="t0001", member_ids=["o"])
+    props = extract_proposals(comm, _graph(), {"Organization": ["name"]},
+                              _ErrorAdapter(), max_grounding_tokens=4000)
+    assert props == []
