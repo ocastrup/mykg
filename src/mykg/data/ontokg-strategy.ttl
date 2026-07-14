@@ -34,6 +34,8 @@
 :Concept a rdfs:Class ; rdfs:subClassOf :Entity .        # an abstract idea, theme, or strategy
 :Place a rdfs:Class ; rdfs:subClassOf :Entity .          # a location / geography
 :Risk a rdfs:Class ; rdfs:subClassOf :Entity .           # a threat / uncertainty to a project, product, org, or decision
+:Issue a rdfs:Class ; rdfs:subClassOf :Entity .          # a realized problem currently affecting work (counterpart to :Risk)
+:Deliverable a rdfs:Class ; rdfs:subClassOf :Entity .    # a project output / work product (distinct from a market :Product)
 
 # --- Subclasses (kept lean; induction may add more) -------------------------
 :Corporation a rdfs:Class ; rdfs:subClassOf :Organization .   # established company
@@ -48,6 +50,9 @@
 :Role a rdfs:Class ; rdfs:subClassOf :Concept .               # a position / responsibility
 :DecisionMaker a rdfs:Class ; rdfs:subClassOf :Role .         # decision-making authority a person holds
 :Stakeholder a rdfs:Class ; rdfs:subClassOf :Role .          # an interested party's stake, held by a Person/Org
+
+# Planning intent (what work aims at)
+:Objective a rdfs:Class ; rdfs:subClassOf :Concept .          # a goal / desired outcome that work aims to achieve
 
 :Software a rdfs:Class ; rdfs:subClassOf :Product .
 :Service a rdfs:Class ; rdfs:subClassOf :Product .
@@ -101,6 +106,12 @@
 
 # Stakeholders
 :stakeholder_in a rdf:Property ; rdfs:domain :Person, :Organization ; rdfs:range :Project, :Decision, :Product, :Organization .  # a party with a stake in something
+
+# Project delivery, objectives & issues
+:produces a rdf:Property ; rdfs:domain :Project, :Organization ; rdfs:range :Deliverable .  # work that yields a deliverable
+:achieves a rdf:Property ; rdfs:domain :Project, :Decision, :Product ; rdfs:range :Objective .  # what the work aims to achieve
+:affects a rdf:Property ; rdfs:domain :Issue ; rdfs:range :Project, :Product, :Organization, :Deliverable .  # what an issue currently impacts
+:milestone_of a rdf:Property ; rdfs:domain :Event ; rdfs:range :Project .  # anchors a milestone / event to its project
 
 # Notes / provenance / knowledge linking
 :authorship a rdf:Property ; rdfs:domain :Document, :Concept ; rdfs:range :Person .
