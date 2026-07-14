@@ -1,0 +1,110 @@
+@prefix rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix :     <http://mykg.local/ontokg#> .
+
+# OntoKG-Strategy: a tight base schema (locked TBox) for a business / strategy /
+# personal-knowledge corpus — projects, competitors, products, people, notes,
+# and strategic decisions on developments.
+#
+# Derived from ontokg-base.ttl (arXiv:2604.02618 App. B) but pruned of the
+# encyclopedic modules (Gene, Aircraft, Film, sports, religion, ...) and
+# extended with the entity types and relations a strategy graph needs.
+#
+# Freeze this as your base schema and compound against it:
+#   mykg extract-graph <dir> --base-schema src/mykg/data/ontokg-strategy.ttl
+#   mykg extract-graph <dir> --append --session knowledge --base-schema <this>
+#
+# Classes carry no attributes here; Pass-1 induction adds them at bootstrap.
+# Relations are object properties; range :Entity is used where the target is
+# intentionally open.
+
+# --- Root -------------------------------------------------------------------
+:Entity a rdfs:Class .
+
+# --- Top-level classes (the entities your corpus is about) ------------------
+:Person a rdfs:Class ; rdfs:subClassOf :Entity .
+:Organization a rdfs:Class ; rdfs:subClassOf :Entity .
+:Product a rdfs:Class ; rdfs:subClassOf :Entity .
+:Project a rdfs:Class ; rdfs:subClassOf :Entity .        # a development / initiative you run or track
+:Decision a rdfs:Class ; rdfs:subClassOf :Entity .       # a strategic choice: rationale, date, alternatives, outcome
+:Document a rdfs:Class ; rdfs:subClassOf :Entity .        # a source artifact: personal note, report, memo
+:Market a rdfs:Class ; rdfs:subClassOf :Entity .         # a market / space competitors and products sit in
+:Event a rdfs:Class ; rdfs:subClassOf :Entity .          # launch, milestone, meeting, funding round
+:Technology a rdfs:Class ; rdfs:subClassOf :Entity .     # a concrete technology, method, or technique
+:Concept a rdfs:Class ; rdfs:subClassOf :Entity .        # an abstract idea, theme, or strategy
+:Place a rdfs:Class ; rdfs:subClassOf :Entity .          # a location / geography
+:Risk a rdfs:Class ; rdfs:subClassOf :Entity .           # a threat / uncertainty to a project, product, org, or decision
+
+# --- Subclasses (kept lean; induction may add more) -------------------------
+:Corporation a rdfs:Class ; rdfs:subClassOf :Organization .   # established company
+:Startup a rdfs:Class ; rdfs:subClassOf :Organization .       # early-stage company (common for competitors)
+
+# Internal organization structure (grouping *within* a company you track)
+:OrgUnit a rdfs:Class ; rdfs:subClassOf :Organization .       # any internal part of an organization
+:Department a rdfs:Class ; rdfs:subClassOf :OrgUnit .         # a functional department
+:BusinessArea a rdfs:Class ; rdfs:subClassOf :OrgUnit .       # an internal business grouping / area of the company
+
+# Roles a person holds (positions, not people)
+:Role a rdfs:Class ; rdfs:subClassOf :Concept .               # a position / responsibility
+:DecisionMaker a rdfs:Class ; rdfs:subClassOf :Role .         # decision-making authority a person holds
+:Stakeholder a rdfs:Class ; rdfs:subClassOf :Role .          # an interested party's stake, held by a Person/Org
+
+:Software a rdfs:Class ; rdfs:subClassOf :Product .
+:Service a rdfs:Class ; rdfs:subClassOf :Product .
+:Platform a rdfs:Class ; rdfs:subClassOf :Product .
+:Device a rdfs:Class ; rdfs:subClassOf :Product .
+:Tool a rdfs:Class ; rdfs:subClassOf :Product .
+:Brand a rdfs:Class ; rdfs:subClassOf :Product .
+
+:Segment a rdfs:Class ; rdfs:subClassOf :Market .
+
+:Note a rdfs:Class ; rdfs:subClassOf :Document .
+:Report a rdfs:Class ; rdfs:subClassOf :Document .
+
+:Launch a rdfs:Class ; rdfs:subClassOf :Event .
+:Milestone a rdfs:Class ; rdfs:subClassOf :Event .
+:Meeting a rdfs:Class ; rdfs:subClassOf :Event .
+
+# --- Relations (object properties) ------------------------------------------
+# Competitive landscape
+:competes_with a rdf:Property ; rdfs:domain :Organization, :Product ; rdfs:range :Entity .
+:targets_market a rdf:Property ; rdfs:domain :Product, :Organization, :Project ; rdfs:range :Market .
+:competes_in a rdf:Property ; rdfs:domain :Organization, :Product ; rdfs:range :Market .
+
+# Products & development
+:develops a rdf:Property ; rdfs:domain :Organization, :Project, :Person ; rdfs:range :Product .
+:works_on a rdf:Property ; rdfs:domain :Person, :Organization ; rdfs:range :Project .
+:depends_on a rdf:Property ; rdfs:domain :Project, :Product ; rdfs:range :Entity .
+:uses_technology a rdf:Property ; rdfs:domain :Organization, :Product, :Project ; rdfs:range :Technology .
+
+# Decisions
+:decision_about a rdf:Property ; rdfs:domain :Decision ; rdfs:range :Entity .
+:decided_by a rdf:Property ; rdfs:domain :Decision ; rdfs:range :Person, :Organization .
+:supersedes a rdf:Property ; rdfs:domain :Decision, :Product, :Project ; rdfs:range :Entity .
+:motivated_by a rdf:Property ; rdfs:domain :Decision ; rdfs:range :Concept, :Event, :Risk .
+
+# People & organizations
+:affiliation a rdf:Property ; rdfs:domain :Person, :Organization ; rdfs:range :Organization .
+:funded_by a rdf:Property ; rdfs:domain :Organization, :Project ; rdfs:range :Organization, :Person .
+:hierarchy a rdf:Property ; rdfs:domain :Organization, :Project, :Product, :Market ; rdfs:range :Entity .
+:location a rdf:Property ; rdfs:domain :Organization, :Event, :Market ; rdfs:range :Place .
+
+# Internal org structure & roles
+:part_of a rdf:Property ; rdfs:domain :OrgUnit ; rdfs:range :Organization .              # nest a dept/area within a company or larger unit
+:holds_role a rdf:Property ; rdfs:domain :Person ; rdfs:range :Role .                    # a person holds a role (e.g. decision maker, stakeholder)
+:responsible_for a rdf:Property ; rdfs:domain :OrgUnit, :Role, :Person ; rdfs:range :Entity .  # what a unit/role/person owns or drives (incl. risk ownership)
+
+# Risk
+:threatens a rdf:Property ; rdfs:domain :Risk ; rdfs:range :Project, :Product, :Organization, :Decision, :Market .  # what the risk endangers
+:mitigated_by a rdf:Property ; rdfs:domain :Risk ; rdfs:range :Decision, :Project, :Concept .  # how the risk is addressed
+:arises_from a rdf:Property ; rdfs:domain :Risk ; rdfs:range :Event, :Concept, :Technology, :Entity .  # source / cause of the risk
+
+# Stakeholders
+:stakeholder_in a rdf:Property ; rdfs:domain :Person, :Organization ; rdfs:range :Project, :Decision, :Product, :Organization .  # a party with a stake in something
+
+# Notes / provenance / knowledge linking
+:authorship a rdf:Property ; rdfs:domain :Document, :Concept ; rdfs:range :Person .
+:documented_in a rdf:Property ; rdfs:domain :Entity ; rdfs:range :Document .
+:mentions a rdf:Property ; rdfs:domain :Document ; rdfs:range :Entity .
+:participates_in a rdf:Property ; rdfs:domain :Person, :Organization, :Product ; rdfs:range :Event .
+:relates_to a rdf:Property ; rdfs:domain :Entity ; rdfs:range :Entity .   # generic fallback link
