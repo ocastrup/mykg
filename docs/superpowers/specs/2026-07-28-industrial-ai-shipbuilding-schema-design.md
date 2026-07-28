@@ -206,19 +206,62 @@ are **not** declared in the TTL:
 - `:Process`: `software_defined` flag, automation level.
 - `:Standard`: status (draft/published), version, jurisdiction.
 
-## 6. Competency questions (what the graph should answer)
+## 6. Competency questions (what the graph must answer)
 
-1. Which organizations develop foundation models applied in `:DesignProcess`,
-   and how mature are they?
-2. What is the lineage (`:builds_on`) chain behind a given capability?
-3. Which digital twins / simulations span both design and manufacturing
-   (`:applied_in` both `:DesignProcess` and `:ManufacturingProcess`)?
-4. Which solutions `:conform_to` which class-society `:ClassRule`, and where are
-   the gaps?
-5. How does the `:DigitalThread` link a shipyard, an owner, a classification
-   society, and manufacturers, and what data is `:data_exchanged_with` whom?
-6. What is the direction of travel — recent `:Event` releases and
-   `:supersedes` chains — for each capability area?
+A KG founded on this schema must be able to answer the following. These are the
+acceptance targets for schema coverage — every question must be expressible as a
+traversal over the declared classes and relations (with induced attributes).
+
+### Research landscape & actors
+
+1. Which organizations (`:ResearchOrg`, `:TechVendor`) develop each
+   `:AICapability`, and which capability areas are most crowded vs. sparse?
+2. For a given capability area, what is the `:builds_on` lineage chain, and
+   which node is the current frontier?
+3. Which foundation models are open-weight vs. frontier/closed (induced
+   `openness`), and who develops each?
+4. What is the direction of travel per capability area over time — recent
+   `:Event` releases (`:release_of`) and `:supersedes` chains?
+
+### Maturity & evidence
+
+5. What is the maturity/TRL and adoption level of each capability applied in
+   shipbuilding, and which are production-ready vs. experimental?
+6. Which capabilities/solutions are `:benchmarked_on` which `:Benchmark`, and
+   what datasets (`:trained_on`) underpin the leading models?
+
+### Solutions in design & manufacturing
+
+7. Which `:Solution`s `:apply` which capabilities, and into which `:Process`
+   (`:applied_in`) — design, manufacturing, or assembly?
+8. Which capabilities `:automate` which processes, and which processes remain
+   un-automated?
+9. Which `:DigitalTwin` / `:Simulation` nodes span **both** `:DesignProcess`
+   and `:ManufacturingProcess` (via `:applied_in` / `:simulates`)?
+10. Which `:SoftwareDefinedAsset`s have a live `:twin_of` twin vs. only
+    predictive `:Simulation`, and which simulations `:validate` design
+    deliverables?
+
+### Digital thread & interoperability
+
+11. How does the `:DigitalThread` `:link` a shipyard, owner, classification
+    society, and manufacturers, and what data is `:data_exchanged_with` whom?
+12. Where are the interoperability gaps — process/actor pairs that should
+    exchange data but have no `:integrates_with` / `:data_exchanged_with` edge?
+
+### Normative dimension
+
+13. Which `:Solution`s / `:Process`es / `:SoftwareDefinedAsset`s `:conform_to`
+    which `:Standard` (`:ClassRule`, `:Regulation`, `:TechnicalStandard`), and
+    where are compliance gaps?
+14. Which `:Standard`s are `:issued_by` which `:ClassificationSociety` /
+    `:StandardsBody`, and which govern the digital thread and AI solutions?
+
+### Cross-cutting / strategic
+
+15. For a target capability (e.g. spatial AI for robotic assembly): who develops
+    it, how mature is it, which processes it serves, which standards govern it,
+    and what is its trajectory — a full one-hop-plus profile?
 
 ## 7. Validation / acceptance
 
