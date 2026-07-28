@@ -121,3 +121,21 @@ def test_parses_through_base_schema(ttl_text):
     parsed = parse_base_schema(ttl_text)
     assert "Entity" in parsed["locked_classes"]
     assert parsed["locked_properties"], "no object properties parsed"
+
+
+def test_class_set_is_exact(graph):
+    declared = {_local(s) for s, _, _ in graph.triples((None, RDF.type, RDFS.Class))}
+    assert declared == set(EXPECTED_CLASSES), {
+        "missing": set(EXPECTED_CLASSES) - declared,
+        "unexpected": declared - set(EXPECTED_CLASSES),
+    }
+
+
+def test_class_parents_match(graph):
+    for cls, parent in EXPECTED_CLASSES.items():
+        subj = next(
+            s for s, _, _ in graph.triples((None, RDF.type, RDFS.Class)) if _local(s) == cls
+        )
+        parent_node = graph.value(subj, RDFS.subClassOf)
+        got = _local(parent_node) if parent_node is not None else None
+        assert got == parent, f"{cls}: expected parent {parent}, got {got}"
