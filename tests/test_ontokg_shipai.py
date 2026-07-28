@@ -139,3 +139,37 @@ def test_class_parents_match(graph):
         parent_node = graph.value(subj, RDFS.subClassOf)
         got = _local(parent_node) if parent_node is not None else None
         assert got == parent, f"{cls}: expected parent {parent}, got {got}"
+
+
+def test_property_set_is_exact(graph):
+    declared = {_local(s) for s, _, _ in graph.triples((None, RDF.type, RDF.Property))}
+    assert declared == set(EXPECTED_PROPERTIES), {
+        "missing": set(EXPECTED_PROPERTIES) - declared,
+        "unexpected": declared - set(EXPECTED_PROPERTIES),
+    }
+
+
+def test_property_domains_and_ranges_match(graph):
+    for prop, (exp_domains, exp_ranges) in EXPECTED_PROPERTIES.items():
+        subj = next(
+            s for s, _, _ in graph.triples((None, RDF.type, RDF.Property)) if _local(s) == prop
+        )
+        domains = {_local(o) for o in graph.objects(subj, RDFS.domain)}
+        ranges = {_local(o) for o in graph.objects(subj, RDFS.range)}
+        assert domains == exp_domains, f"{prop} domains: {domains} != {exp_domains}"
+        assert ranges == exp_ranges, f"{prop} ranges: {ranges} != {exp_ranges}"
+
+
+def test_no_dangling_terms(graph):
+    # Every class referenced by subClassOf / domain / range must be declared.
+    declared = {_local(s) for s, _, _ in graph.triples((None, RDF.type, RDFS.Class))}
+    referenced = set()
+    for _, _, o in graph.triples((None, RDFS.subClassOf, None)):
+        referenced.add(_local(o))
+    for _, _, o in graph.triples((None, RDFS.domain, None)):
+        referenced.add(_local(o))
+    for _, _, o in graph.triples((None, RDFS.range, None)):
+        referenced.add(_local(o))
+    referenced.discard("Literal")  # rdfs:Literal is a datatype, not a class
+    undeclared = referenced - declared
+    assert not undeclared, f"undeclared terms referenced: {undeclared}"
