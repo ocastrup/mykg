@@ -76,3 +76,49 @@ def test_no_write_outside_synthesis(tmp_path):
     _run(["--vault", str(vault), "--fix"])
     after = (vault / "Yard" / "entities" / "shared-node.md").read_text()
     assert before == after
+
+
+def test_fix_does_not_corrupt_same_named_embed(tmp_path):
+    # An embed sharing the collision target's name appears BEFORE the backlink.
+    # The fix must rewrite only the backlink, never the embed.
+    vault = tmp_path / "mykg_wiki"
+    for rel in ["Research/entities/shared-node.md", "Yard/entities/shared-node.md"]:
+        f = vault / rel
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text("# note\n")
+    report = vault / "Synthesis" / "reports" / "r.md"
+    report.parent.mkdir(parents=True, exist_ok=True)
+    report.write_text(
+        "---\ntitle: R\ndomains:\n- Research\n---\n\n"
+        "![[shared-node]]\n\n"
+        "See [[shared-node|Shared]].\n"
+    )
+    r = _run(["--vault", str(vault), "--fix", "--json"])
+    body = report.read_text()
+    # Embed left untouched:
+    assert "![[shared-node]]" in body
+    # Backlink qualified:
+    assert "[[Research/entities/shared-node|Shared]]" in body
+    # Only one collision remained to fix, now resolved -> exit 0.
+    assert r.returncode == 0, r.stdout
+
+
+def test_fix_qualifies_slash_qualified_collision_target(tmp_path):
+    # Target already contains a path segment; qualification must not duplicate
+    # "entities/" (no "entities/entities/...").
+    vault = tmp_path / "mykg_wiki"
+    for rel in ["Research/entities/shared.md", "Yard/entities/shared.md"]:
+        f = vault / rel
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text("# note\n")
+    report = vault / "Synthesis" / "reports" / "r.md"
+    report.parent.mkdir(parents=True, exist_ok=True)
+    report.write_text(
+        "---\ntitle: R\ndomains:\n- Research\n---\n\n"
+        "See [[entities/shared|S]].\n"
+    )
+    r = _run(["--vault", str(vault), "--fix", "--json"])
+    body = report.read_text()
+    assert "[[Research/entities/shared|S]]" in body
+    assert "entities/entities" not in body
+    assert r.returncode == 0, r.stdout

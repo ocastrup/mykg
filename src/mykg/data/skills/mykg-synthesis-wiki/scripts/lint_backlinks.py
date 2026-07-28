@@ -95,11 +95,14 @@ def _classify(target: str, stem_to_domains, domain_rel, vault_rel, synth_rel):
     return "dangling", []
 
 
-def _qualify_path(domain: str, stem: str, domain_rel) -> str:
-    for rel in domain_rel.get(domain, set()):
-        if rel.rsplit("/", 1)[-1] == stem:
+def _qualify_path(domain: str, target: str, domain_rel) -> str:
+    rels = domain_rel.get(domain, set())
+    if target in rels:  # target is already a domain-relative path (e.g. "entities/x")
+        return f"{domain}/{target}"
+    for rel in rels:  # target is a bare stem
+        if rel.rsplit("/", 1)[-1] == target:
             return f"{domain}/{rel}"
-    return f"{domain}/entities/{stem}"
+    return f"{domain}/entities/{target}"
 
 
 def main(argv=None) -> int:
@@ -129,7 +132,7 @@ def main(argv=None) -> int:
         report["reports_checked"] += 1
         text = md.read_text(encoding="utf-8")
         fm_domains = _load_frontmatter_domains(text)
-        changed = False
+        pending_fixes = []  # (start, end, replacement) against original text
         for m in list(LINK_RE.finditer(text)):
             if m.group(0).startswith("!"):
                 continue  # embeds (images/transclusions) are not backlinks
@@ -154,8 +157,9 @@ def main(argv=None) -> int:
             if args.fix and len(pick) == 1:
                 new_target = _qualify_path(pick[0], target, domain_rel)
                 new_raw = raw.replace(target, new_target, 1)
-                text = text.replace(f"[[{raw}]]", f"[[{new_raw}]]", 1)
-                changed = True
+                # Anchor the rewrite to this exact match span so an identically
+                # named embed elsewhere in the file is never touched.
+                pending_fixes.append((m.start(), m.end(), f"[[{new_raw}]]"))
                 report["fixed"].append(
                     {"file": rel_name, "target": target, "new": new_target}
                 )
@@ -163,7 +167,9 @@ def main(argv=None) -> int:
                 report["collisions"].append(
                     {"file": rel_name, "target": target, "domains": doms}
                 )
-        if changed:
+        if pending_fixes:
+            for start, end, replacement in sorted(pending_fixes, reverse=True):
+                text = text[:start] + replacement + text[end:]
             md.write_text(text, encoding="utf-8")
 
     unresolved = report["dangling"] or report["collisions"] or report["ambiguous"]
