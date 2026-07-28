@@ -25,7 +25,7 @@ output/
 intermediate/
 .old/
 sessions/
-mykg_sessions/
+kg_sessions/
 .coverage
 htmlcov
 CLAUDE.md

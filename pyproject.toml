@@ -37,6 +37,11 @@ dependencies = [
 mykg = "mykg.cli:main"
 context-calculator = "mykg.utility.context_calculator:main"
 
+[project.optional-dependencies]
+wiki = [
+    "matplotlib>=3.8",
+]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
@@ -50,6 +55,7 @@ dev = [
     "pytest-cov>=7.1.0",
     "ruff>=0.4",
     "snakeviz>=2.2.2",
+    "matplotlib>=3.8",
 ]
 
 [tool.pytest.ini_options]

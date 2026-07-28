@@ -9,14 +9,14 @@ import pytest
 
 @pytest.mark.live
 def test_build_wiki_on_latest_session():
-    sessions = sorted(Path("mykg_sessions").glob("*/output/nodes.jsonl"))
+    sessions = sorted(Path("kg_sessions").glob("*/output/nodes.jsonl"))
     if not sessions:
         pytest.skip("no completed session available")
     session = sessions[-1].parent.parent.name
     res = subprocess.run(["uv", "run", "mykg", "build-wiki", session],
                          capture_output=True, text=True)
     assert res.returncode == 0, res.stderr
-    vault = Path("mykg_sessions") / session / "wiki_vault"
+    vault = Path("kg_sessions") / session / "wiki_vault"
     assert (vault / "Home.md").exists()
     assert any((vault / "entities").glob("*.md"))
     # Every wikilink target in every entity page must be a real file in the vault.

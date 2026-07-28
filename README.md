@@ -116,7 +116,7 @@ mykg init
 mykg extract-graph my_notes/
 ```
 
-Open `mykg_sessions/<timestamp>/output/knowledge_graph.html` in your browser to explore the result.
+Open `kg_sessions/<timestamp>/output/knowledge_graph.html` in your browser to explore the result.
 
 ### Install from source
 
@@ -232,7 +232,7 @@ mykg extract-graph my_notes/ --session 2026-05-17T18-31-07 --workers 4
 
 # Pause for schema review after Pass 1
 mykg extract-graph my_notes/ --review
-# → edit mykg_sessions/<name>/intermediate/schema.json
+# → edit kg_sessions/<name>/intermediate/schema.json
 mykg approve-schema --session 2026-05-17T18-31-07
 mykg extract-graph my_notes/ --session 2026-05-17T18-31-07 --review
 
@@ -248,7 +248,7 @@ mykg extract-graph my_notes/ --base-schema ontology/core.ttl
 Every run automatically creates an isolated session folder:
 
 ```
-mykg_sessions/
+kg_sessions/
   2026-05-17T18-31-07/
     input/           ← archived copy of all input Markdown files
     intermediate/    ← all intermediate pipeline state
@@ -259,7 +259,7 @@ mykg_sessions/
 
 Sessions are the primary unit of resumability. Pass `--session <name>` to resume from the last completed step. Pass `--from-step <step>` to force-restart from a specific point.
 
-The sessions root is configurable via `pipeline.paths.sessions_dir` (default: `mykg_sessions/` in the current directory).
+The sessions root is configurable via `pipeline.paths.sessions_dir` (default: `kg_sessions/` in the current directory).
 
 ### Pipeline Steps
 
@@ -453,7 +453,7 @@ Pause after Pass 1 to inspect and edit the induced schema before Pass 2 runs:
 
 ```bash
 mykg extract-graph my_notes/ --review
-# → pipeline halts; edit mykg_sessions/<name>/intermediate/schema.json
+# → pipeline halts; edit kg_sessions/<name>/intermediate/schema.json
 mykg approve-schema --session <name>
 mykg extract-graph my_notes/ --session <name> --review   # resumes from Pass 2
 ```
@@ -626,7 +626,7 @@ Or use `--neo4j-csv` on the command line for a one-off run without editing confi
 
 ### Walkthrough Report
 
-A human-readable summary is written to `mykg_sessions/<name>/walkthrough.md` after every run:
+A human-readable summary is written to `kg_sessions/<name>/walkthrough.md` after every run:
 
 ```bash
 # Regenerate the walkthrough for an existing session
@@ -677,8 +677,8 @@ You can run myKG extractions as a tool call from within a Claude Code session. T
 mykg extract-graph ./docs/ --session my-docs-kg
 
 # Then reference the output in your session:
-# mykg_sessions/my-docs-kg/output/nodes.jsonl
-# mykg_sessions/my-docs-kg/output/knowledge_graph.ttl
+# kg_sessions/my-docs-kg/output/nodes.jsonl
+# kg_sessions/my-docs-kg/output/knowledge_graph.ttl
 ```
 
 Claude Code can then read `nodes.jsonl` or `edges.jsonl` as well as the Obsidian vault directly to answer questions about the extracted graph, or load `knowledge_graph.ttl` into a SPARQL tool for structured queries.

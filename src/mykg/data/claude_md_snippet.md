@@ -10,10 +10,10 @@ Don't guess the session name. Run one of these from the project root:
 
 ```bash
 # Path to latest session root (use this in subsequent commands):
-ls -td mykg_sessions/*/ 2>/dev/null | head -1
+ls -td kg_sessions/*/ 2>/dev/null | head -1
 
 # One-line wiki status (node count + session path):
-ls -td mykg_sessions/*/output/nodes.jsonl 2>/dev/null | head -1 \
+ls -td kg_sessions/*/output/nodes.jsonl 2>/dev/null | head -1 \
   | xargs -I{} sh -c 'echo "mykg wiki: $(wc -l < {}) nodes in $(dirname $(dirname {}))"'
 ```
 
@@ -57,7 +57,7 @@ records the full invocation):
 
 ```bash
 # Input directory of the most recent extract-graph run:
-head -1 "$(ls -td mykg_sessions/*/run.log 2>/dev/null | head -1)" \
+head -1 "$(ls -td kg_sessions/*/run.log 2>/dev/null | head -1)" \
   | sed -nE 's/.*mykg extract-graph ([^ ]+).*/\1/p'
 ```
 

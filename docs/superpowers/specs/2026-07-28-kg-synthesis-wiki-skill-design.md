@@ -19,18 +19,18 @@ KG-generated wiki pages.
 ## Purpose & boundaries
 
 **Reads (only):**
-- `mykg_sessions/<Domain>/output/nodes.jsonl`
-- `mykg_sessions/<Domain>/output/edges.jsonl`
-- `mykg_wiki/<Domain>/.wiki_manifest.json` (id→path index, for backlink validation only)
+- `kg_sessions/<Domain>/output/nodes.jsonl`
+- `kg_sessions/<Domain>/output/edges.jsonl`
+- `kg_wiki/<Domain>/.wiki_manifest.json` (id→path index, for backlink validation only)
 
 **Never reads:** `raw/` source documents.
 
-**Never writes / modifies:** the KG-generated domain wikis (`mykg_wiki/Research/`,
-`mykg_wiki/Yard/`, and any future domain folder). "Never touches" = never writes;
+**Never writes / modifies:** the KG-generated domain wikis (`kg_wiki/Research/`,
+`kg_wiki/Yard/`, and any future domain folder). "Never touches" = never writes;
 read-only access to a domain's `.wiki_manifest.json` for link validation is
 permitted.
 
-**Writes (only):** `mykg_wiki/Synthesis/`.
+**Writes (only):** `kg_wiki/Synthesis/`.
 
 The graph is the ground truth. The skill answers from what the KG contains, not
 from model training data. If the KG does not contain the answer, it says so
@@ -43,10 +43,10 @@ Reference/fixture vault: `C:\Users\oca\DNV\Yards - Documents\test-wiki`.
 ```
 test-wiki/
 ├── raw/                              source documents — skill NEVER reads
-├── mykg_sessions/
+├── kg_sessions/
 │   ├── Research/output/{nodes,edges}.jsonl, knowledge_graph.ttl, networkx_output/
 │   └── Yard/output/{nodes,edges}.jsonl, ...
-└── mykg_wiki/                        ONE Obsidian vault (top-level .obsidian/)
+└── kg_wiki/                        ONE Obsidian vault (top-level .obsidian/)
     ├── Research/                     KG-generated wiki — skill NEVER writes
     │   ├── entities/  hubs/  sources/  Home.md  .wiki_manifest.json
     ├── Yard/                         KG-generated wiki — skill NEVER writes
@@ -55,8 +55,8 @@ test-wiki/
 ```
 
 - **Domains are named session folders** (`Research`, `Yard`), one per seed schema —
-  not timestamped. The skill discovers domains by listing `mykg_sessions/`.
-- The whole `mykg_wiki/` is a **single Obsidian vault**, so `[[wikilinks]]` resolve
+  not timestamped. The skill discovers domains by listing `kg_sessions/`.
+- The whole `kg_wiki/` is a **single Obsidian vault**, so `[[wikilinks]]` resolve
   vault-wide across domain folders and `Synthesis/`.
 
 ### KG data formats (observed)
@@ -87,7 +87,7 @@ backlinks resolve to the existing entity notes.
 
 ## Synthesis folder layout
 
-The skill owns `mykg_wiki/Synthesis/` completely:
+The skill owns `kg_wiki/Synthesis/` completely:
 
 ```
 Synthesis/
@@ -114,12 +114,12 @@ exists, tell the user to synthesize first; do not auto-create.
 
 ## Discovery & grounding
 
-1. List `mykg_sessions/` → domain names.
+1. List `kg_sessions/` → domain names.
 2. For each domain, load `output/nodes.jsonl` + `output/edges.jsonl`.
 3. Build an in-context **entity table**: `id → {display, type, domain}` where
    `display = attributes.name.value` if present, else a humanized form of the id.
 4. For backlink validation, load each domain's
-   `mykg_wiki/<Domain>/.wiki_manifest.json` → set of valid page ids and their
+   `kg_wiki/<Domain>/.wiki_manifest.json` → set of valid page ids and their
    `<Domain>/entities/<id>` paths. Note where the same id appears in more than one
    domain (collision set).
 
@@ -198,7 +198,7 @@ ambiguous and may resolve to the wrong domain. Mitigations:
 
 ## Error handling
 
-- No `mykg_sessions/` or empty `output/` for a domain → tell the user to run
+- No `kg_sessions/` or empty `output/` for a domain → tell the user to run
   extraction first; never fabricate an answer.
 - Entity named in the answer but absent from every KG → do **not** invent a
   backlink; render as plain text and note that it is not in the graph.

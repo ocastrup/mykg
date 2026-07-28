@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build a `mykg-synthesis-wiki` agent skill that answers competence questions grounded only in the mykg knowledge graphs (all domains) and maintains an LLM-authored synthesis wiki with backlinks and charts under `mykg_wiki/Synthesis/`.
+**Goal:** Build a `mykg-synthesis-wiki` agent skill that answers competence questions grounded only in the mykg knowledge graphs (all domains) and maintains an LLM-authored synthesis wiki with backlinks and charts under `kg_wiki/Synthesis/`.
 
-**Architecture:** A description-triggered agent skill (`SKILL.md` + `references/` templates) plus two deterministic Python helper scripts: `chart.py` (matplotlib PNG renderer) and `lint_backlinks.py` (validates/fixes wikilinks in the synthesis folder against the KG-generated domain wikis). The skill reads `mykg_sessions/<Domain>/output/{nodes,edges}.jsonl`, never source docs, never modifies domain wikis, and writes only to `mykg_wiki/Synthesis/`.
+**Architecture:** A description-triggered agent skill (`SKILL.md` + `references/` templates) plus two deterministic Python helper scripts: `chart.py` (matplotlib PNG renderer) and `lint_backlinks.py` (validates/fixes wikilinks in the synthesis folder against the KG-generated domain wikis). The skill reads `kg_sessions/<Domain>/output/{nodes,edges}.jsonl`, never source docs, never modifies domain wikis, and writes only to `kg_wiki/Synthesis/`.
 
 **Tech Stack:** Python 3.11+, matplotlib (new optional/dev dep), pyyaml (existing), pytest (existing), uv for running. Skill authored as markdown for the Copilot CLI / Claude Code skill loader.
 
@@ -56,7 +56,7 @@ Create `src/mykg/data/skills/mykg-synthesis-wiki/SKILL.md` with just the frontma
 ```markdown
 ---
 name: mykg-synthesis-wiki
-description: "Use to answer competence questions from the mykg knowledge graphs and maintain an LLM-authored synthesis wiki. Triggers: 'synthesize ...', 'what does the KG/graph say about X', 'add to the synthesis wiki', 'write a synthesis report on ...', 'compare A and B across domains', 'lint the synthesis wiki', 'check synthesis backlinks'. Reads ONLY the knowledge graphs (mykg_sessions/*/output/nodes.jsonl + edges.jsonl, all domains); never reads source documents; never modifies the KG-generated domain wikis. Writes only to mykg_wiki/Synthesis/."
+description: "Use to answer competence questions from the mykg knowledge graphs and maintain an LLM-authored synthesis wiki. Triggers: 'synthesize ...', 'what does the KG/graph say about X', 'add to the synthesis wiki', 'write a synthesis report on ...', 'compare A and B across domains', 'lint the synthesis wiki', 'check synthesis backlinks'. Reads ONLY the knowledge graphs (kg_sessions/*/output/nodes.jsonl + edges.jsonl, all domains); never reads source documents; never modifies the KG-generated domain wikis. Writes only to kg_wiki/Synthesis/."
 ---
 
 # mykg Synthesis Wiki
@@ -354,7 +354,7 @@ def _run(args):
 
 
 def _make_vault(tmp_path: Path) -> Path:
-    vault = tmp_path / "mykg_wiki"
+    vault = tmp_path / "kg_wiki"
     for rel in [
         "Research/entities/benchmark-mmlu.md",
         "Research/entities/shared-node.md",
@@ -739,23 +739,23 @@ never the sources, and writes only to its own folder.
 
 ## Boundaries (hard rules)
 
-- **Read only the KGs.** Load `mykg_sessions/<Domain>/output/nodes.jsonl` and
+- **Read only the KGs.** Load `kg_sessions/<Domain>/output/nodes.jsonl` and
   `edges.jsonl` for every domain. Never read `raw/` or any source document.
-- **Never modify the domain wikis.** `mykg_wiki/<Domain>/` (e.g. `Research/`,
+- **Never modify the domain wikis.** `kg_wiki/<Domain>/` (e.g. `Research/`,
   `Yard/`) is read-only. You may read a domain's `.wiki_manifest.json` for link
   validation, nothing else there.
-- **Write only to `mykg_wiki/Synthesis/`.** All reports, charts, index, and log
+- **Write only to `kg_wiki/Synthesis/`.** All reports, charts, index, and log
   live there.
 - **Never fabricate.** If the graphs do not contain the answer, say so. Never
   invent a backlink to an entity that is not in the KG.
 
 ## Locate the vault root
 
-The vault root is the folder that contains both `mykg_sessions/` and
-`mykg_wiki/`. Resolve in this order and confirm with the user if unsure:
+The vault root is the folder that contains both `kg_sessions/` and
+`kg_wiki/`. Resolve in this order and confirm with the user if unsure:
 1. A path the user gave in the request.
-2. The `MYKG_WIKI_ROOT` environment variable, if set.
-3. The current directory, if it contains both `mykg_sessions/` and `mykg_wiki/`.
+2. The `kg_wiki_ROOT` environment variable, if set.
+3. The current directory, if it contains both `kg_sessions/` and `kg_wiki/`.
 4. Otherwise, ask the user for the path.
 
 Reference/fixture root for testing:
@@ -763,7 +763,7 @@ Reference/fixture root for testing:
 
 ## Discover domains and load the KGs
 
-1. List subfolders of `<root>/mykg_sessions/` → domain names (e.g. `Research`,
+1. List subfolders of `<root>/kg_sessions/` → domain names (e.g. `Research`,
    `Yard`).
 2. For each, read `output/nodes.jsonl` and `output/edges.jsonl`.
 3. Build an in-context entity table: `id -> {display, type, domain}` where
@@ -805,15 +805,15 @@ Charts are required. Choose the mechanism:
 
   ```bash
   uv run python "<skill_dir>/scripts/chart.py" --kind bar --data data.json \
-    --out "<root>/mykg_wiki/Synthesis/assets/<slug>-01.png" --title "…"
+    --out "<root>/kg_wiki/Synthesis/assets/<slug>-01.png" --title "…"
   ```
 
   Or count a field directly from a domain's nodes:
 
   ```bash
   uv run python "<skill_dir>/scripts/chart.py" \
-    --from-jsonl "<root>/mykg_sessions/<Domain>/output/nodes.jsonl" \
-    --count-by type --out "<root>/mykg_wiki/Synthesis/assets/<slug>-01.png" \
+    --from-jsonl "<root>/kg_sessions/<Domain>/output/nodes.jsonl" \
+    --count-by type --out "<root>/kg_wiki/Synthesis/assets/<slug>-01.png" \
     --title "<Domain> nodes by type"
   ```
 
@@ -827,7 +827,7 @@ Triggers: "lint the synthesis wiki", "check synthesis backlinks". Two parts:
 
    ```bash
    uv run python "<skill_dir>/scripts/lint_backlinks.py" \
-     --vault "<root>/mykg_wiki" --fix
+     --vault "<root>/kg_wiki" --fix
    ```
 
    It validates every `[[…]]` target against the domain wikis, auto-qualifies
@@ -850,7 +850,7 @@ Triggers: "lint the synthesis wiki", "check synthesis backlinks". Two parts:
 
 ## Error handling
 
-- No `mykg_sessions/` or an empty `output/` for a domain → tell the user to run
+- No `kg_sessions/` or an empty `output/` for a domain → tell the user to run
   extraction first; do not fabricate.
 - KG regenerated and an id disappeared → lint flags the backlink as dangling;
   never silently delete.
@@ -908,13 +908,13 @@ SKILL = (
 FIXTURE = Path(r"C:\Users\oca\DNV\Yards - Documents\test-wiki")
 
 pytestmark = pytest.mark.skipif(
-    not (FIXTURE / "mykg_wiki").is_dir(),
+    not (FIXTURE / "kg_wiki").is_dir(),
     reason="test-wiki fixture vault not present on this machine",
 )
 
 
 def test_count_by_type_on_real_research_nodes(tmp_path):
-    nodes = FIXTURE / "mykg_sessions" / "Research" / "output" / "nodes.jsonl"
+    nodes = FIXTURE / "kg_sessions" / "Research" / "output" / "nodes.jsonl"
     out = tmp_path / "research-types.png"
     r = subprocess.run(
         [sys.executable, str(SKILL / "scripts" / "chart.py"),
@@ -930,7 +930,7 @@ def test_lint_runs_readonly_on_real_vault():
     # No Synthesis folder yet -> exit 2 with a clear message (read-only, no writes).
     r = subprocess.run(
         [sys.executable, str(SKILL / "scripts" / "lint_backlinks.py"),
-         "--vault", str(FIXTURE / "mykg_wiki")],
+         "--vault", str(FIXTURE / "kg_wiki")],
         capture_output=True, text=True,
     )
     assert r.returncode == 2
