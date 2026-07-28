@@ -22,7 +22,7 @@ def grounding_hash(node: WikiNode, neighbors: list[Neighbor]) -> str:
     payload = {
         "attributes": {k: node.attributes[k] for k in sorted(node.attributes)},
         "chunks": node.grounded_chunks,
-        "neighbors": sorted((n.id, n.relationship) for n in neighbors),
+        "neighbors": sorted((n.id, n.name, n.relationship, n.confidence) for n in neighbors),
     }
     blob = json.dumps(payload, sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
