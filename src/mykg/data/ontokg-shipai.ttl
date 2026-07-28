@@ -1,0 +1,123 @@
+@prefix rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix :     <http://mykg.local/ontokg#> .
+
+# OntoKG-ShipAI: a locked base schema (TBox) for a knowledge graph mapping the
+# research landscape of INDUSTRIAL AI IN SHIPBUILDING — design & manufacturing
+# stage only (operations are out of scope).
+#
+# Standalone schema (separate from ontokg-strategy.ttl). Same namespace and
+# :Entity root as the other mykg schemas so it round-trips through
+# parse_base_schema. Classes carry no attributes; Pass-1 induction adds them.
+# Trends and maturity (momentum, TRL, adoption, openness) are induced
+# attributes, not classes. Digital-thread / interoperability semantics are
+# carried by relations.
+#
+# Usage:
+#   mykg extract-graph <dir> --base-schema src/mykg/data/ontokg-shipai.ttl
+#   mykg extract-graph <dir> --append --session <name> \
+#       --base-schema src/mykg/data/ontokg-shipai.ttl --obsidian-vault
+#
+# Design spec: docs/superpowers/specs/2026-07-28-industrial-ai-shipbuilding-schema-design.md
+
+# --- Root -------------------------------------------------------------------
+:Entity a rdfs:Class .
+
+# --- Actors -----------------------------------------------------------------
+:Organization a rdfs:Class ; rdfs:subClassOf :Entity .
+:Shipyard a rdfs:Class ; rdfs:subClassOf :Organization .
+:ShipOwner a rdfs:Class ; rdfs:subClassOf :Organization .
+:ClassificationSociety a rdfs:Class ; rdfs:subClassOf :Organization .
+:Manufacturer a rdfs:Class ; rdfs:subClassOf :Organization .          # equipment / component supplier
+:ResearchOrg a rdfs:Class ; rdfs:subClassOf :Organization .           # lab / academia / institute
+:TechVendor a rdfs:Class ; rdfs:subClassOf :Organization .            # AI / software solution provider
+:RegulatoryBody a rdfs:Class ; rdfs:subClassOf :Organization .
+:StandardsBody a rdfs:Class ; rdfs:subClassOf :Organization .
+
+:Person a rdfs:Class ; rdfs:subClassOf :Entity .                      # researcher / author / decision maker
+
+# --- AI capabilities (what AI can do) ---------------------------------------
+:AICapability a rdfs:Class ; rdfs:subClassOf :Entity .
+:FoundationModel a rdfs:Class ; rdfs:subClassOf :AICapability .        # frontier vs open-weight = induced attrs
+:SpatialAI a rdfs:Class ; rdfs:subClassOf :AICapability .             # 3D perception, SLAM, world models
+:RoboticSystem a rdfs:Class ; rdfs:subClassOf :AICapability .         # autonomous mfg / assembly robotics
+:DigitalTwin a rdfs:Class ; rdfs:subClassOf :AICapability .           # live, synced virtual replica
+:Simulation a rdfs:Class ; rdfs:subClassOf :AICapability .            # predictive / offline virtual execution
+:GenerativeDesign a rdfs:Class ; rdfs:subClassOf :AICapability .      # generative / optimization design AI
+:AIMethod a rdfs:Class ; rdfs:subClassOf :AICapability .              # general fallback
+
+# --- Applied solutions & software-defined assets ----------------------------
+:Solution a rdfs:Class ; rdfs:subClassOf :Entity .                    # deployed system applying capabilities
+:SoftwareDefinedAsset a rdfs:Class ; rdfs:subClassOf :Entity .        # asset/equipment/block/cell in software
+
+# --- Shipbuilding processes & digital thread --------------------------------
+:Process a rdfs:Class ; rdfs:subClassOf :Entity .
+:DesignProcess a rdfs:Class ; rdfs:subClassOf :Process .
+:ManufacturingProcess a rdfs:Class ; rdfs:subClassOf :Process .
+:AssemblyProcess a rdfs:Class ; rdfs:subClassOf :Process .
+:DigitalThread a rdfs:Class ; rdfs:subClassOf :Entity .               # integration backbone
+
+# --- Normative (standards & rules) ------------------------------------------
+:Standard a rdfs:Class ; rdfs:subClassOf :Entity .
+:ClassRule a rdfs:Class ; rdfs:subClassOf :Standard .                 # classification-society rule
+:Regulation a rdfs:Class ; rdfs:subClassOf :Standard .               # statutory / regulatory instrument
+:ReferenceArchitecture a rdfs:Class ; rdfs:subClassOf :Standard .
+:TechnicalStandard a rdfs:Class ; rdfs:subClassOf :Standard .         # ISO and other technical standards
+
+# --- Supporting -------------------------------------------------------------
+:Document a rdfs:Class ; rdfs:subClassOf :Entity .
+:ResearchPaper a rdfs:Class ; rdfs:subClassOf :Document .
+:Report a rdfs:Class ; rdfs:subClassOf :Document .
+:Whitepaper a rdfs:Class ; rdfs:subClassOf :Document .
+:Benchmark a rdfs:Class ; rdfs:subClassOf :Entity .                   # evaluation benchmark (maturity evidence)
+:Dataset a rdfs:Class ; rdfs:subClassOf :Entity .
+:Deliverable a rdfs:Class ; rdfs:subClassOf :Entity .                 # process output / work product
+:Concept a rdfs:Class ; rdfs:subClassOf :Entity .                     # theme / approach / strategy
+:Event a rdfs:Class ; rdfs:subClassOf :Entity .                       # release, milestone, conference
+:Place a rdfs:Class ; rdfs:subClassOf :Entity .
+
+# --- Relations (object properties) ------------------------------------------
+# Research landscape / development
+:develops a rdf:Property ; rdfs:domain :Organization, :Person ; rdfs:range :AICapability, :Solution .
+:researches a rdf:Property ; rdfs:domain :Organization, :Person ; rdfs:range :AICapability, :Concept .
+:builds_on a rdf:Property ; rdfs:domain :AICapability ; rdfs:range :AICapability .
+:supersedes a rdf:Property ; rdfs:domain :AICapability, :Solution, :Standard ; rdfs:range :Entity .
+:trained_on a rdf:Property ; rdfs:domain :FoundationModel ; rdfs:range :Dataset .
+:benchmarked_on a rdf:Property ; rdfs:domain :AICapability, :Solution ; rdfs:range :Benchmark .
+
+# Applied solutions / usage
+:applies a rdf:Property ; rdfs:domain :Solution ; rdfs:range :AICapability .
+:applied_in a rdf:Property ; rdfs:domain :Solution, :AICapability ; rdfs:range :Process .
+:automates a rdf:Property ; rdfs:domain :AICapability, :Solution ; rdfs:range :Process .
+:simulates a rdf:Property ; rdfs:domain :Simulation, :DigitalTwin ; rdfs:range :SoftwareDefinedAsset, :Process .
+:twin_of a rdf:Property ; rdfs:domain :DigitalTwin ; rdfs:range :SoftwareDefinedAsset, :Process .
+:validates a rdf:Property ; rdfs:domain :Simulation ; rdfs:range :DesignProcess, :ManufacturingProcess, :Deliverable .
+
+# Process / digital thread / interoperability
+:precedes a rdf:Property ; rdfs:domain :Process ; rdfs:range :Process .
+:produces a rdf:Property ; rdfs:domain :Process ; rdfs:range :Deliverable, :SoftwareDefinedAsset .
+:integrates_with a rdf:Property ; rdfs:domain :Solution, :Process, :DigitalThread ; rdfs:range :Entity .
+:data_exchanged_with a rdf:Property ; rdfs:domain :Process, :Organization, :DigitalThread ; rdfs:range :Entity .
+:interoperates_with a rdf:Property ; rdfs:domain :Organization ; rdfs:range :Organization .
+:links a rdf:Property ; rdfs:domain :DigitalThread ; rdfs:range :Process, :Organization, :SoftwareDefinedAsset .
+
+# Normative / standards
+:conforms_to a rdf:Property ; rdfs:domain :Solution, :Process, :AICapability, :SoftwareDefinedAsset ; rdfs:range :Standard .
+:governed_by a rdf:Property ; rdfs:domain :Process, :Organization, :Solution ; rdfs:range :Standard, :RegulatoryBody .
+:issued_by a rdf:Property ; rdfs:domain :Standard ; rdfs:range :StandardsBody, :ClassificationSociety, :RegulatoryBody .
+
+# Actors / stakeholders
+:collaborates_with a rdf:Property ; rdfs:domain :Organization ; rdfs:range :Organization .
+:competes_with a rdf:Property ; rdfs:domain :Organization, :Solution ; rdfs:range :Entity .
+:supplies a rdf:Property ; rdfs:domain :Manufacturer ; rdfs:range :SoftwareDefinedAsset, :Shipyard .
+:classifies a rdf:Property ; rdfs:domain :ClassificationSociety ; rdfs:range :Shipyard, :SoftwareDefinedAsset, :Process .
+:stakeholder_in a rdf:Property ; rdfs:domain :Organization, :Person ; rdfs:range :Process, :Solution, :Standard .
+
+# Provenance / evidence
+:documented_in a rdf:Property ; rdfs:domain :Entity ; rdfs:range :Document .
+:mentions a rdf:Property ; rdfs:domain :Document ; rdfs:range :Entity .
+:authored_by a rdf:Property ; rdfs:domain :Document, :AICapability ; rdfs:range :Person, :Organization .
+:published_by a rdf:Property ; rdfs:domain :Document ; rdfs:range :Organization .
+:release_of a rdf:Property ; rdfs:domain :Event ; rdfs:range :AICapability, :Solution .
+:announced_at a rdf:Property ; rdfs:domain :Event ; rdfs:range :Place .
+:relates_to a rdf:Property ; rdfs:domain :Entity ; rdfs:range :Entity .
