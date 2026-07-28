@@ -11,6 +11,7 @@ from mykg.wiki_pipeline import (
     run_wiki_index,
     run_wiki_load,
     run_wiki_pages,
+    run_wiki_sources,
     vault_dir,
 )
 
@@ -88,5 +89,36 @@ def test_incremental_second_run_regenerates_nothing(tmp_path, monkeypatch):
     assert before == after
 
 
-def test_wiki_steps_list_names_and_order():
-    assert [s.name for s in WIKI_STEPS] == ["wiki_load", "wiki_pages", "wiki_hubs", "wiki_index"]
+def test_wiki_sources_writes_full_text_notes(tmp_path, monkeypatch):
+    monkeypatch.setattr("mykg.config.WIKI_ROOT", str(tmp_path / "wiki"))
+    root = _session(tmp_path)
+    ctx = _ctx(root)
+    run_wiki_sources(ctx)
+    note = (vault_dir(ctx) / "sources" / "doc.md").read_text()
+    import yaml
+    fm = yaml.safe_load(note.split("---\n")[1])
+    assert fm["type"] == "Source"
+    assert fm["tags"] == ["Source"]
+    assert "Alice works at Acme." in note
+    assert (vault_dir(ctx) / ".wiki_sources_manifest.json").exists()
+
+
+def test_wiki_sources_cleans_up_removed_and_is_incremental(tmp_path, monkeypatch):
+    monkeypatch.setattr("mykg.config.WIKI_ROOT", str(tmp_path / "wiki"))
+    root = _session(tmp_path)
+    ctx = _ctx(root)
+    run_wiki_sources(ctx)
+    note_path = vault_dir(ctx) / "sources" / "doc.md"
+    before = note_path.stat().st_mtime_ns
+    run_wiki_sources(ctx)                       # unchanged -> not rewritten
+    assert note_path.stat().st_mtime_ns == before
+    import json
+    fm_path = root / "intermediate" / "file_manifest.json"
+    fm_path.write_text(json.dumps({}))
+    run_wiki_sources(ctx)
+    assert not note_path.exists()
+
+
+def test_wiki_steps_include_sources_after_load():
+    assert [s.name for s in WIKI_STEPS] == [
+        "wiki_load", "wiki_sources", "wiki_pages", "wiki_hubs", "wiki_index"]
