@@ -9,6 +9,14 @@ from pydantic import BaseModel
 from mykg.chunker import chunk_file
 
 
+def source_note_name(raw_path: str) -> str:
+    """Corpus file path -> flat vault note name (drop dir prefix and .md)."""
+    base = raw_path.replace("\\", "/").rsplit("/", 1)[-1]
+    if base.endswith(".md"):
+        base = base[:-3]
+    return base
+
+
 class WikiNode(BaseModel):
     id: str
     type: str

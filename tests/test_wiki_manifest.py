@@ -63,3 +63,29 @@ def test_manifest_roundtrip(tmp_path):
     save_manifest(tmp_path, {"person-alice": "abc"})
     assert load_manifest(tmp_path)["pages"]["person-alice"]["hash"] == "abc"
     assert load_manifest(tmp_path)["pages"]["person-alice"]["path"] == "entities/person-alice.md"
+
+
+def test_grounding_hash_changes_with_neighbor_confidence_and_name():
+    from mykg.wiki.loader import Neighbor
+    node = WikiNode(
+        id="person-alice", type="Person", name="Alice",
+        attributes={}, source_files=["doc.md"],
+        grounded_chunk_keys=["doc.md::1"], grounded_chunks=["text"], grounded=True)
+    base_nb = [Neighbor(id="org-acme", name="Acme", type="Organization",
+                        relationship="works_at", confidence=0.70)]
+    changed_conf = [Neighbor(id="org-acme", name="Acme", type="Organization",
+                             relationship="works_at", confidence=0.95)]
+    changed_name = [Neighbor(id="org-acme", name="Acme Corp", type="Organization",
+                             relationship="works_at", confidence=0.70)]
+    h0 = grounding_hash(node, base_nb)
+    assert grounding_hash(node, changed_conf) != h0
+    assert grounding_hash(node, changed_name) != h0
+
+
+def test_source_manifest_roundtrip(tmp_path):
+    from mykg.wiki.manifest import load_source_manifest, save_source_manifest
+    assert load_source_manifest(tmp_path) == {"sources": {}}
+    save_source_manifest(tmp_path, {"doc": "hash123"})
+    loaded = load_source_manifest(tmp_path)
+    assert loaded["sources"]["doc"]["hash"] == "hash123"
+    assert loaded["sources"]["doc"]["path"] == "sources/doc.md"

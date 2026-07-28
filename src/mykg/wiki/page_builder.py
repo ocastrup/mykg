@@ -8,11 +8,16 @@ import yaml
 
 from mykg.chunker import count_tokens
 from mykg.llm.adapter import LLMAdapter
-from mykg.wiki.loader import Neighbor, WikiGraph, WikiNode
+from mykg.wiki.loader import Neighbor, WikiGraph, WikiNode, source_note_name
 
 log = logging.getLogger(__name__)
 
 _WIKILINK = re.compile(r"\[\[(.*?)\]\]", re.DOTALL)
+_TAG_INVALID = re.compile(r"[^A-Za-z0-9_/-]+")
+
+
+def _type_tag(type_name: str) -> str:
+    return _TAG_INVALID.sub("_", type_name.strip())
 
 
 def strip_invalid_wikilinks(markdown: str, allowed_ids: set[str]) -> tuple[str, list[str]]:
@@ -39,21 +44,25 @@ def strip_invalid_wikilinks(markdown: str, allowed_ids: set[str]) -> tuple[str, 
     return text, dropped
 
 
-def _frontmatter(node: WikiNode) -> str:
+def _frontmatter(node: WikiNode, neighbors: list[Neighbor]) -> str:
     data = {
         "mykg_id": node.id,
         "type": node.type,
+        "tags": [_type_tag(node.type)],
         "aliases": [node.name],
-        "source_files": node.source_files,
+        "source_files": [f"[[{source_note_name(s)}]]" for s in node.source_files],
+        "neighbors": [{"link": f"[[{n.id}|{n.name}]]", "confidence": n.confidence}
+                      for n in neighbors],
         "grounded": node.grounded,
         "grounded_chunks": node.grounded_chunk_keys,
     }
     return "---\n" + yaml.safe_dump(data, sort_keys=False, allow_unicode=True) + "---\n\n"
 
 
-def render_entity_page(node: WikiNode, body_markdown: str) -> str:
+def render_entity_page(node: WikiNode, body_markdown: str,
+                       neighbors: list[Neighbor]) -> str:
     """Wrap already-validated body markdown with YAML frontmatter."""
-    return _frontmatter(node) + body_markdown.strip() + "\n"
+    return _frontmatter(node, neighbors) + body_markdown.strip() + "\n"
 
 
 def render_stub_page(
@@ -70,7 +79,14 @@ def render_stub_page(
     if neighbors:
         lines += ["", "## Connections", ""]
         lines += [f"- [[{n.id}|{n.name}]] ({n.relationship})" for n in neighbors]
-    return render_entity_page(node, "\n".join(lines))
+    return render_entity_page(node, "\n".join(lines), neighbors)
+
+
+def render_source_page(raw_path: str, content: str) -> str:
+    """Render a corpus document as a vault note: minimal frontmatter + full text."""
+    data = {"type": "Source", "tags": ["Source"], "source_file": raw_path}
+    fm = "---\n" + yaml.safe_dump(data, sort_keys=False, allow_unicode=True) + "---\n\n"
+    return fm + content.strip() + "\n"
 
 
 _SYSTEM = (
@@ -144,7 +160,7 @@ def generate_entity_page(node: WikiNode, neighbors: list[Neighbor], adapter: LLM
         return render_stub_page(node, neighbors, reason="generation_failed"), False
     allowed = {n.id for n in neighbors}
     cleaned, _dropped = strip_invalid_wikilinks(body, allowed)
-    return render_entity_page(node, cleaned), True
+    return render_entity_page(node, cleaned, neighbors), True
 
 
 def extract_lead(page_markdown: str) -> str:

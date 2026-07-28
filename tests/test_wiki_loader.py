@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from mykg.wiki.loader import WikiGraph, load_wiki_graph
+from mykg.wiki.loader import WikiGraph, load_wiki_graph, source_note_name
 
 
 def _write_session(root: Path) -> Path:
@@ -71,3 +71,11 @@ def test_missing_file_fails_fast(tmp_path):
     (root / "output" / "nodes.jsonl").unlink()
     with pytest.raises(FileNotFoundError, match="nodes.jsonl"):
         load_wiki_graph(root)
+
+
+def test_source_note_name_strips_dirs_and_extension():
+    assert source_note_name("doc.md") == "doc"
+    assert source_note_name("_preprocessed\\Future Yard Architecture.md") == "Future Yard Architecture"
+    assert source_note_name("nested/sub/Report.md") == "Report"
+    assert source_note_name("NoExtension") == "NoExtension"
+

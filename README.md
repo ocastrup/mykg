@@ -819,6 +819,18 @@ For a thorough description of the architecture, algorithm, data models, and desi
 
 ---
 
+## Obsidian vault tips
+
+Each entity note carries a `tags` property set from its type (e.g. `#Person`,
+`#Document`), and source documents are notes under `sources/` tagged `#Source`.
+Use Obsidian **Graph view → Groups** to recolor these: add a group with query
+`tag:#Document` to highlight one entity type, or `path:sources/` to highlight
+source documents. Groups only recolor nodes — they do not change graph topology.
+The `neighbors` frontmatter list (each `{link, confidence}`) is queryable with
+Dataview, e.g. to surface an entity's strongest first-hop connections.
+
+---
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
