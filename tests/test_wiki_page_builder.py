@@ -42,11 +42,14 @@ def test_bare_invented_link_stripped_to_text():
 
 
 def test_render_entity_page_has_valid_frontmatter():
-    page = render_entity_page(_node(), "## Alice\n\nAlice works at [[org-acme|Acme]].")
+    page = render_entity_page(_node(), "## Alice\n\nAlice works at [[org-acme|Acme]].", [])
     assert page.startswith("---\n")
     fm = yaml.safe_load(page.split("---\n")[1])
     assert fm["mykg_id"] == "person-alice"
     assert fm["type"] == "Person"
+    assert fm["tags"] == ["Person"]
+    assert fm["source_files"] == ["[[doc]]"]
+    assert fm["neighbors"] == []
     assert fm["grounded"] is True
     assert fm["grounded_chunks"] == ["doc.md::1"]
     assert "Alice works at [[org-acme|Acme]]." in page
@@ -84,7 +87,37 @@ def test_stub_page_flags_ungrounded():
         relationship="works_at", confidence=0.7)])
     fm = yaml.safe_load(page.split("---\n")[1])
     assert fm["grounded"] is False
+    assert fm["neighbors"] == [{"link": "[[org-acme|Acme]]", "confidence": 0.7}]
     assert "[[org-acme|Acme]]" in page
+
+
+def test_frontmatter_has_tags_wikilinks_and_neighbors():
+    node = WikiNode(
+        id="person-alice", type="Software Engineer", name="Alice",
+        attributes={"name": {"value": "Alice", "confidence": 0.9}},
+        source_files=["doc.md", "_preprocessed\\Future Yard Architecture.md"],
+        grounded_chunk_keys=["doc.md::1"],
+        grounded_chunks=["Alice works at Acme."], grounded=True)
+    nb = [Neighbor(id="org-acme", name="Acme", type="Organization",
+                   relationship="works_at", confidence=0.91)]
+    page = render_entity_page(node, "## Alice\n\nbody", nb)
+    fm = yaml.safe_load(page.split("---\n")[1])
+    assert fm["type"] == "Software Engineer"
+    assert fm["tags"] == ["Software_Engineer"]
+    assert fm["source_files"] == ["[[doc]]", "[[Future Yard Architecture]]"]
+    assert fm["neighbors"] == [{"link": "[[org-acme|Acme]]", "confidence": 0.91}]
+
+
+def test_frontmatter_neighbors_empty_when_none():
+    node = WikiNode(
+        id="person-bob", type="Person", name="Bob",
+        attributes={}, source_files=["doc.md"],
+        grounded_chunk_keys=[], grounded_chunks=[], grounded=False)
+    page = render_entity_page(node, "body", [])
+    fm = yaml.safe_load(page.split("---\n")[1])
+    assert fm["neighbors"] == []
+    assert fm["tags"] == ["Person"]
+    assert fm["source_files"] == ["[[doc]]"]
 
 
 class _StubAdapter:
