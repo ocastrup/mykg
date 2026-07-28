@@ -173,3 +173,64 @@ def test_no_dangling_terms(graph):
     referenced.discard("Literal")  # rdfs:Literal is a datatype, not a class
     undeclared = referenced - declared
     assert not undeclared, f"undeclared terms referenced: {undeclared}"
+
+
+# Each competency question (spec section 6) -> (required classes, required properties)
+COMPETENCY_REQUIREMENTS = {
+    "CQ01_who_develops_capabilities": (
+        {"ResearchOrg", "TechVendor", "AICapability"}, {"develops"},
+    ),
+    "CQ02_capability_lineage": ({"AICapability"}, {"builds_on"}),
+    "CQ03_open_vs_frontier_models": ({"FoundationModel"}, {"develops"}),
+    "CQ04_direction_of_travel": ({"AICapability", "Event"}, {"release_of", "supersedes"}),
+    "CQ05_maturity_of_applied_capabilities": ({"AICapability", "Process"}, {"applied_in"}),
+    "CQ06_benchmarks_and_datasets": (
+        {"AICapability", "Solution", "Benchmark", "Dataset", "FoundationModel"},
+        {"benchmarked_on", "trained_on"},
+    ),
+    "CQ07_solutions_into_processes": (
+        {"Solution", "AICapability", "Process"}, {"applies", "applied_in"},
+    ),
+    "CQ08_automation_coverage": ({"AICapability", "Solution", "Process"}, {"automates"}),
+    "CQ09_twins_sims_span_design_and_mfg": (
+        {"DigitalTwin", "Simulation", "DesignProcess", "ManufacturingProcess", "SoftwareDefinedAsset"},
+        {"applied_in", "simulates"},
+    ),
+    "CQ10_live_twin_vs_predictive_sim": (
+        {"SoftwareDefinedAsset", "DigitalTwin", "Simulation", "Deliverable"},
+        {"twin_of", "simulates", "validates"},
+    ),
+    "CQ11_digital_thread_links_stakeholders": (
+        {"DigitalThread", "Shipyard", "ShipOwner", "ClassificationSociety", "Manufacturer"},
+        {"links", "data_exchanged_with"},
+    ),
+    "CQ12_interoperability_gaps": (
+        {"Process", "Organization"}, {"integrates_with", "data_exchanged_with"},
+    ),
+    "CQ13_conformance_and_gaps": (
+        {"Solution", "Process", "SoftwareDefinedAsset", "Standard", "ClassRule",
+         "Regulation", "TechnicalStandard"},
+        {"conforms_to"},
+    ),
+    "CQ14_who_issues_standards": (
+        {"Standard", "ClassificationSociety", "StandardsBody"}, {"issued_by"},
+    ),
+    "CQ15_full_capability_profile": (
+        {"AICapability", "SpatialAI", "RoboticSystem", "Process", "Standard", "Organization"},
+        {"develops", "applied_in", "governed_by"},
+    ),
+}
+
+
+def test_competency_questions_are_answerable(graph):
+    classes = {_local(s) for s, _, _ in graph.triples((None, RDF.type, RDFS.Class))}
+    props = {_local(s) for s, _, _ in graph.triples((None, RDF.type, RDF.Property))}
+    for cq, (need_classes, need_props) in COMPETENCY_REQUIREMENTS.items():
+        missing_c = need_classes - classes
+        missing_p = need_props - props
+        assert not missing_c, f"{cq}: missing classes {missing_c}"
+        assert not missing_p, f"{cq}: missing properties {missing_p}"
+
+
+def test_all_fifteen_competency_questions_present():
+    assert len(COMPETENCY_REQUIREMENTS) == 15
