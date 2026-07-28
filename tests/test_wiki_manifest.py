@@ -63,3 +63,12 @@ def test_manifest_roundtrip(tmp_path):
     save_manifest(tmp_path, {"person-alice": "abc"})
     assert load_manifest(tmp_path)["pages"]["person-alice"]["hash"] == "abc"
     assert load_manifest(tmp_path)["pages"]["person-alice"]["path"] == "entities/person-alice.md"
+
+
+def test_source_manifest_roundtrip(tmp_path):
+    from mykg.wiki.manifest import load_source_manifest, save_source_manifest
+    assert load_source_manifest(tmp_path) == {"sources": {}}
+    save_source_manifest(tmp_path, {"doc": "hash123"})
+    loaded = load_source_manifest(tmp_path)
+    assert loaded["sources"]["doc"]["hash"] == "hash123"
+    assert loaded["sources"]["doc"]["path"] == "sources/doc.md"

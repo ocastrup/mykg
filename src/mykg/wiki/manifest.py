@@ -56,3 +56,21 @@ def save_manifest(vault_dir: Path, hashes: dict[str, str]) -> None:
     pages = {nid: {"hash": h, "path": f"entities/{nid}.md"} for nid, h in hashes.items()}
     (vault_dir / _MANIFEST_NAME).write_text(
         json.dumps({"pages": pages}, indent=2), encoding="utf-8")
+
+
+_SOURCE_MANIFEST_NAME = ".wiki_sources_manifest.json"
+
+
+def load_source_manifest(vault_dir: Path) -> dict:
+    path = vault_dir / _SOURCE_MANIFEST_NAME
+    if not path.exists():
+        return {"sources": {}}
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def save_source_manifest(vault_dir: Path, hashes: dict[str, str]) -> None:
+    vault_dir.mkdir(parents=True, exist_ok=True)
+    sources = {name: {"hash": h, "path": f"sources/{name}.md"}
+               for name, h in hashes.items()}
+    (vault_dir / _SOURCE_MANIFEST_NAME).write_text(
+        json.dumps({"sources": sources}, indent=2), encoding="utf-8")
