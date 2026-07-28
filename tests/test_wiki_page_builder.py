@@ -211,3 +211,14 @@ def test_home_links_every_type_hub():
     assert "[[hubs/Person|Person]]" in home
     assert "[[hubs/Organization|Organization]]" in home
     assert "1" in home  # node count
+
+
+def test_render_source_page_has_frontmatter_and_full_body():
+    from mykg.wiki.page_builder import render_source_page
+    page = render_source_page("_preprocessed\\Future Yard Architecture.md",
+                              "# Heading\n\nFull body text.")
+    fm = yaml.safe_load(page.split("---\n")[1])
+    assert fm["type"] == "Source"
+    assert fm["tags"] == ["Source"]
+    assert fm["source_file"] == "_preprocessed\\Future Yard Architecture.md"
+    assert "# Heading\n\nFull body text." in page

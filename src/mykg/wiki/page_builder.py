@@ -82,6 +82,13 @@ def render_stub_page(
     return render_entity_page(node, "\n".join(lines), neighbors)
 
 
+def render_source_page(raw_path: str, content: str) -> str:
+    """Render a corpus document as a vault note: minimal frontmatter + full text."""
+    data = {"type": "Source", "tags": ["Source"], "source_file": raw_path}
+    fm = "---\n" + yaml.safe_dump(data, sort_keys=False, allow_unicode=True) + "---\n\n"
+    return fm + content.strip() + "\n"
+
+
 _SYSTEM = (
     "You write concise, factual wiki articles for a personal knowledge base. "
     "Use ONLY the provided source excerpts and attributes — never invent facts. "
