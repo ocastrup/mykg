@@ -64,7 +64,7 @@ def test_full_pipeline_writes_vault(tmp_path, monkeypatch):
     monkeypatch.setattr("mykg.config.WIKI_ROOT", str(tmp_path / "wiki"))
     root = _session(tmp_path)
     ctx = _ctx(root)
-    for step in (run_wiki_load, run_wiki_pages, run_wiki_hubs, run_wiki_index):
+    for step in (run_wiki_load, run_wiki_sources, run_wiki_pages, run_wiki_hubs, run_wiki_index):
         step(ctx)
     vault = vault_dir(ctx)
     alice = (vault / "entities" / "person-alice.md").read_text()
@@ -74,6 +74,8 @@ def test_full_pipeline_writes_vault(tmp_path, monkeypatch):
     home = (vault / "Home.md").read_text()
     assert "Entities: 2" in home
     assert (vault / ".wiki_manifest.json").exists()
+    assert (vault / "sources" / "doc.md").exists()
+    assert (vault / ".wiki_sources_manifest.json").exists()
 
 
 def test_incremental_second_run_regenerates_nothing(tmp_path, monkeypatch):
