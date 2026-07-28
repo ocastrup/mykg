@@ -223,6 +223,10 @@ COMPETENCY_REQUIREMENTS = {
 
 
 def test_competency_questions_are_answerable(graph):
+    # Presence check only: asserts every class/property a CQ needs is declared.
+    # The structural guarantee that those properties actually connect the right
+    # classes (correct rdfs:domain/rdfs:range) is enforced by
+    # test_property_domains_and_ranges_match.
     classes = {_local(s) for s, _, _ in graph.triples((None, RDF.type, RDFS.Class))}
     props = {_local(s) for s, _, _ in graph.triples((None, RDF.type, RDF.Property))}
     for cq, (need_classes, need_props) in COMPETENCY_REQUIREMENTS.items():
