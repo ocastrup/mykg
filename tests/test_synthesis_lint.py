@@ -18,7 +18,7 @@ def _run(args):
 
 
 def _make_vault(tmp_path: Path) -> Path:
-    vault = tmp_path / "mykg_wiki"
+    vault = tmp_path / "kg_wiki"
     for rel in [
         "Research/entities/benchmark-mmlu.md",
         "Research/entities/shared-node.md",
@@ -81,7 +81,7 @@ def test_no_write_outside_synthesis(tmp_path):
 def test_fix_does_not_corrupt_same_named_embed(tmp_path):
     # An embed sharing the collision target's name appears BEFORE the backlink.
     # The fix must rewrite only the backlink, never the embed.
-    vault = tmp_path / "mykg_wiki"
+    vault = tmp_path / "kg_wiki"
     for rel in ["Research/entities/shared-node.md", "Yard/entities/shared-node.md"]:
         f = vault / rel
         f.parent.mkdir(parents=True, exist_ok=True)
@@ -106,7 +106,7 @@ def test_fix_does_not_corrupt_same_named_embed(tmp_path):
 def test_fix_qualifies_slash_qualified_collision_target(tmp_path):
     # Target already contains a path segment; qualification must not duplicate
     # "entities/" (no "entities/entities/...").
-    vault = tmp_path / "mykg_wiki"
+    vault = tmp_path / "kg_wiki"
     for rel in ["Research/entities/shared.md", "Yard/entities/shared.md"]:
         f = vault / rel
         f.parent.mkdir(parents=True, exist_ok=True)

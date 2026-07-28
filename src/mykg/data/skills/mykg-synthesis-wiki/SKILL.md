@@ -1,6 +1,6 @@
 ---
 name: mykg-synthesis-wiki
-description: "Use to answer competence questions from the mykg knowledge graphs and maintain an LLM-authored synthesis wiki. Triggers: 'synthesize ...', 'what does the KG/graph say about X', 'add to the synthesis wiki', 'write a synthesis report on ...', 'compare A and B across domains', 'lint the synthesis wiki', 'check synthesis backlinks'. Reads ONLY the knowledge graphs (mykg_sessions/*/output/nodes.jsonl + edges.jsonl, all domains); never reads source documents; never modifies the KG-generated domain wikis. Writes only to mykg_wiki/Synthesis/."
+description: "Use to answer competence questions from the mykg knowledge graphs and maintain an LLM-authored synthesis wiki. Triggers: 'synthesize ...', 'what does the KG/graph say about X', 'add to the synthesis wiki', 'write a synthesis report on ...', 'compare A and B across domains', 'lint the synthesis wiki', 'check synthesis backlinks'. Reads ONLY the knowledge graphs (kg_sessions/*/output/nodes.jsonl + edges.jsonl, all domains); never reads source documents; never modifies the KG-generated domain wikis. Writes only to kg_wiki/Synthesis/."
 ---
 
 # mykg Synthesis Wiki
@@ -12,23 +12,23 @@ never the sources, and writes only to its own folder.
 
 ## Boundaries (hard rules)
 
-- **Read only the KGs.** Load `mykg_sessions/<Domain>/output/nodes.jsonl` and
+- **Read only the KGs.** Load `kg_sessions/<Domain>/output/nodes.jsonl` and
   `edges.jsonl` for every domain. Never read `raw/` or any source document.
-- **Never modify the domain wikis.** `mykg_wiki/<Domain>/` (e.g. `Research/`,
+- **Never modify the domain wikis.** `kg_wiki/<Domain>/` (e.g. `Research/`,
   `Yard/`) is read-only. You may read a domain's `.wiki_manifest.json` for link
   validation, nothing else there.
-- **Write only to `mykg_wiki/Synthesis/`.** All reports, charts, index, and log
+- **Write only to `kg_wiki/Synthesis/`.** All reports, charts, index, and log
   live there.
 - **Never fabricate.** If the graphs do not contain the answer, say so. Never
   invent a backlink to an entity that is not in the KG.
 
 ## Locate the vault root
 
-The vault root is the folder that contains both `mykg_sessions/` and
-`mykg_wiki/`. Resolve in this order and confirm with the user if unsure:
+The vault root is the folder that contains both `kg_sessions/` and
+`kg_wiki/`. Resolve in this order and confirm with the user if unsure:
 1. A path the user gave in the request.
-2. The `MYKG_WIKI_ROOT` environment variable, if set.
-3. The current directory, if it contains both `mykg_sessions/` and `mykg_wiki/`.
+2. The `kg_wiki_ROOT` environment variable, if set.
+3. The current directory, if it contains both `kg_sessions/` and `kg_wiki/`.
 4. Otherwise, ask the user for the path.
 
 Reference/fixture root for testing:
@@ -36,7 +36,7 @@ Reference/fixture root for testing:
 
 ## Discover domains and load the KGs
 
-1. List subfolders of `<root>/mykg_sessions/` → domain names (e.g. `Research`,
+1. List subfolders of `<root>/kg_sessions/` → domain names (e.g. `Research`,
    `Yard`).
 2. For each, read `output/nodes.jsonl` and `output/edges.jsonl`.
 3. Build an in-context entity table: `id -> {display, type, domain}` where
@@ -78,15 +78,15 @@ Charts are required. Choose the mechanism:
 
   ```bash
   uv run python "<skill_dir>/scripts/chart.py" --kind bar --data data.json \
-    --out "<root>/mykg_wiki/Synthesis/assets/<slug>-01.png" --title "…"
+    --out "<root>/kg_wiki/Synthesis/assets/<slug>-01.png" --title "…"
   ```
 
   Or count a field directly from a domain's nodes:
 
   ```bash
   uv run python "<skill_dir>/scripts/chart.py" \
-    --from-jsonl "<root>/mykg_sessions/<Domain>/output/nodes.jsonl" \
-    --count-by type --out "<root>/mykg_wiki/Synthesis/assets/<slug>-01.png" \
+    --from-jsonl "<root>/kg_sessions/<Domain>/output/nodes.jsonl" \
+    --count-by type --out "<root>/kg_wiki/Synthesis/assets/<slug>-01.png" \
     --title "<Domain> nodes by type"
   ```
 
@@ -100,7 +100,7 @@ Triggers: "lint the synthesis wiki", "check synthesis backlinks". Two parts:
 
    ```bash
    uv run python "<skill_dir>/scripts/lint_backlinks.py" \
-     --vault "<root>/mykg_wiki" --fix
+     --vault "<root>/kg_wiki" --fix
    ```
 
    It validates every `[[…]]` target against the domain wikis, auto-qualifies
@@ -123,7 +123,7 @@ Triggers: "lint the synthesis wiki", "check synthesis backlinks". Two parts:
 
 ## Error handling
 
-- No `mykg_sessions/` or an empty `output/` for a domain → tell the user to run
+- No `kg_sessions/` or an empty `output/` for a domain → tell the user to run
   extraction first; do not fabricate.
 - KG regenerated and an id disappeared → lint flags the backlink as dangling;
   never silently delete.

@@ -11,8 +11,8 @@ profile: openrouter-free
 # so switching `profile:` above never changes where your data lives.
 # ---------------------------------------------------------------------------
 paths:
-  sessions_root: mykg_sessions   # parent for per-run session dirs (each run = timestamped subfolder)
-  wiki_root: mykg_wiki           # build-wiki output: each session's wiki -> <wiki_root>/<session-name>/
+  sessions_root: kg_sessions   # parent for per-run session dirs (each run = timestamped subfolder)
+  wiki_root: kg_wiki           # build-wiki output: each session's wiki -> <wiki_root>/<session-name>/
 
 # ---------------------------------------------------------------------------
 # Profiles — each is fully self-contained: provider, credentials, and pipeline.
