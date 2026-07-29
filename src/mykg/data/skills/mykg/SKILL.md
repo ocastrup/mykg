@@ -454,6 +454,55 @@ Use the jsonl path to identify the target node(s), then resolve `<node>.md` in t
 
 ---
 
+### Stage 4e — watch-queue consumer (`/mykg watch`)
+
+`/mykg watch` drains the watch-folder request queue produced by the `mykg watch`
+daemon (see `src/mykg/watcher.py`). Read `sessions_root` from `mykg_config.yaml`
+(`paths.sessions_root`) and the queue dir from `watch.queue_dir` (default
+`_watch_queue`, relative to `sessions_root` unless absolute).
+
+Queue layout:
+
+```
+<queue_dir>\
+  <ts>__<session>.request.json     # pending
+  done\    ...                      # processed OK (audit)
+  failed\  ...                      # errored (audit)
+  _state\  <session>.state.json     # daemon manifests (do not touch)
+```
+
+Loop (bounded to 20 waves, then print a re-invoke hint):
+
+1. List pending `*.request.json` at the queue top-level; sort oldest-first by
+   filename (timestamps sort lexicographically).
+2. Take the oldest. Enforce serialize-per-session: never run two extractions for
+   the same session concurrently within this loop.
+3. Read the request JSON. Fields: `request_id`, `session`, `folder`,
+   `changed_files` (advisory), `command`, `execution`.
+4. If `execution.mode == "supervised"`: restate the resolved command and ask the
+   user to confirm (as in Stage 2). If `"autopilot"`: proceed without asking.
+5. Validate the session exists under `sessions_root`. If missing, move the request
+   to `failed\` and continue.
+6. Resolve `command` into a CLI call, validating flags against live
+   `uv run mykg extract-graph --help`:
+   `uv run mykg extract-graph "<folder>" --append --session <session>`
+   plus `--base-schema <path>` if `command.base_schema` is set and
+   `--obsidian-vault` if `command.obsidian_vault` is true.
+7. Launch it and drain the LLM inbox/outbox exactly as in Stage 4a (parallel
+   subagents per wave).
+8. On success: move the request file to `done\`. On error (`on_error:
+   "quarantine"`): move it to `failed\` and continue to the next request. Never
+   delete requests.
+9. After processing all currently-pending requests, exit. When re-invoked, keep
+   polling until the 20-wave budget is spent, then print: "Watch budget
+   exhausted — re-invoke /mykg watch to keep draining."
+
+Autopilot is advisory to this skill only; it cannot override the host CLI's own
+tool-approval settings. Always keep run logs; failures are quarantined for audit
+and manual re-queue (move the file from `failed\` back to the top level).
+
+---
+
 ## Stage 5 — final report
 
 When the loop exits (or the synchronous command returns), print:

@@ -159,3 +159,16 @@ If the skill crashes or the user kills Claude Code, in-flight tasks stay in the 
 - The agent provider does not record token counts in `llm.log` — the skill subagent's token usage is not visible to mykg.
 - The skill produces best-effort JSON; the pipeline's own validators (TBox check, schema validate, ABox check) catch malformed output and trigger the existing feedback path.
 - There is no heartbeat. A dead skill leaves in-flight pipeline threads blocked until `timeout_seconds`. If the user wants faster failure, Ctrl-C the pipeline subprocess and re-launch.
+
+---
+
+## Watch-folder trigger
+
+The `mykg watch` daemon (see `src/mykg/watcher.py` and
+`docs/superpowers/specs/2026-07-29-mykg-watch-trigger-design.md`) polls
+per-session folders configured in the top-level `watch:` block of
+`mykg_config.yaml` and enqueues JSON extraction-requests into
+`<sessions_root>\<queue_dir>\`. The `/mykg watch` skill mode (Stage 4e in the
+mykg skill) drains that queue, runs `extract-graph --append` for each request,
+and answers the resulting LLM inbox/outbox tasks — the same contract described
+above, one level up.
