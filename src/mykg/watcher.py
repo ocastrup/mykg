@@ -15,6 +15,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
+import yaml
+
 from mykg.logging import get
 
 log = get("mykg.watcher")
@@ -264,8 +266,6 @@ def _reload_raw() -> dict:
 
     The `watch:` block is top-level (profile-independent), so raw YAML is enough.
     """
-    import yaml
-
     from mykg import config as cfg_mod
 
     return yaml.safe_load(Path(cfg_mod.CONFIG_PATH).read_text(encoding="utf-8"))
@@ -298,7 +298,7 @@ def run_daemon(*, once: bool = False) -> None:
     while True:
         try:
             cfg = load_watch_config(_reload_raw(), sessions_root)
-        except (KeyError, ValueError) as exc:
+        except (KeyError, ValueError, yaml.YAMLError, OSError) as exc:
             log.error("watch: config reload failed (%s) — keeping previous config", exc)
         poll_once(
             cfg, sessions_root,

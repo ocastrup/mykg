@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 import yaml
 from click.testing import CliRunner
 
@@ -63,3 +64,44 @@ def test_watch_once_missing_session_no_request(tmp_path, monkeypatch):
     queue = sessions / "_watch_queue"
     if queue.exists():
         assert list(queue.glob("*.request.json")) == []
+
+
+class _StopLoop(Exception):
+    """Sentinel used to break run_daemon's infinite loop after one iteration."""
+
+
+def test_run_daemon_survives_malformed_yaml_reload(tmp_path, monkeypatch):
+    """A malformed/half-saved config mid-run must not crash the daemon.
+
+    The reload raises yaml.YAMLError; run_daemon should log and keep the previous
+    config, reaching poll_once and the sleep (which we hijack to stop the loop).
+    """
+    import mykg.config as cfg_mod
+    from mykg import watcher
+
+    sessions = tmp_path / "sessions"
+    (sessions / "Research").mkdir(parents=True)
+    folder = tmp_path / "watch"
+    folder.mkdir()
+
+    raw = {"watch": {"entries": [{"session": "Research", "folder": str(folder)}]}}
+    monkeypatch.setattr(cfg_mod, "SESSIONS_DIR", str(sessions))
+    monkeypatch.setattr(cfg_mod, "RAW", raw)
+
+    def _boom():
+        raise yaml.YAMLError("while scanning: broken config")
+
+    monkeypatch.setattr(watcher, "_reload_raw", _boom)
+
+    calls = {"n": 0}
+
+    def _fake_sleep(_seconds):
+        calls["n"] += 1
+        raise _StopLoop()
+
+    monkeypatch.setattr(watcher.time, "sleep", _fake_sleep)
+
+    # Must not raise yaml.YAMLError; the loop reaches the (hijacked) sleep exactly once.
+    with pytest.raises(_StopLoop):
+        watcher.run_daemon(once=False)
+    assert calls["n"] == 1
