@@ -257,3 +257,52 @@ def poll_once(
             entry.session, len(changed),
         )
     return enqueued
+
+
+def _reload_raw() -> dict:
+    """Re-read the raw YAML so the daemon picks up edits between cycles.
+
+    The `watch:` block is top-level (profile-independent), so raw YAML is enough.
+    """
+    import yaml
+
+    from mykg import config as cfg_mod
+
+    return yaml.safe_load(Path(cfg_mod.CONFIG_PATH).read_text(encoding="utf-8"))
+
+
+def run_daemon(*, once: bool = False) -> None:
+    """Entry point for `mykg watch`. Reads global config and runs the loop."""
+    from mykg import config as cfg_mod
+
+    sessions_root = Path(cfg_mod.SESSIONS_DIR)
+    cfg = load_watch_config(cfg_mod.RAW, sessions_root)
+    for sub in ("done", "failed", "_state"):
+        (cfg.queue_dir / sub).mkdir(parents=True, exist_ok=True)
+
+    trackers: dict[str, DebounceState] = {}
+    log.info(
+        "watch: %d entr(ies) poll=%ds debounce=%ds queue=%s autopilot=%s",
+        len(cfg.entries), cfg.poll_interval_seconds, cfg.debounce_seconds,
+        cfg.queue_dir, cfg.autopilot,
+    )
+
+    if once:
+        poll_once(
+            cfg, sessions_root,
+            now_wall=datetime.now(timezone.utc), now_mono=time.monotonic(),
+            trackers=trackers, skip_debounce=True,
+        )
+        return
+
+    while True:
+        try:
+            cfg = load_watch_config(_reload_raw(), sessions_root)
+        except (KeyError, ValueError) as exc:
+            log.error("watch: config reload failed (%s) — keeping previous config", exc)
+        poll_once(
+            cfg, sessions_root,
+            now_wall=datetime.now(timezone.utc), now_mono=time.monotonic(),
+            trackers=trackers, skip_debounce=False,
+        )
+        time.sleep(cfg.poll_interval_seconds)
