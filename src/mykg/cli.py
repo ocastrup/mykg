@@ -752,6 +752,22 @@ def extract_graph(
         )
 
 
+@cli.command("watch")
+@click.option(
+    "--once",
+    is_flag=True,
+    help="Run a single scan/enqueue cycle and exit (skips debounce; good for cron/tests).",
+)
+@click.option("--verbose", "-v", is_flag=True, help="Enable DEBUG-level logging")
+def watch(once, verbose):
+    """Watch configured folders and enqueue extract-graph --append requests."""
+    from mykg.logging import setup
+    from mykg.watcher import run_daemon
+
+    setup(verbose=verbose)
+    run_daemon(once=once)
+
+
 @cli.command("build-wiki")
 @click.argument("session")
 @click.option("--rebuild", is_flag=True, help="Force-regenerate every page (ignore manifest)")

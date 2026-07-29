@@ -15,6 +15,25 @@ paths:
   wiki_root: kg_wiki           # build-wiki output: each session's wiki -> <wiki_root>/<session-name>/
 
 # ---------------------------------------------------------------------------
+# Watch — per-session folder triggers. Top-level (profile-independent).
+# `mykg watch` polls each folder, debounces, and enqueues a JSON extraction-
+# request into <sessions_root>\<queue_dir>\; a /mykg watch host-agent loop runs
+# extract-graph --append for the request. See docs/superpowers/specs/
+# 2026-07-29-mykg-watch-trigger-design.md.
+# ---------------------------------------------------------------------------
+watch:
+  poll_interval_seconds: 300     # daemon folder-scan cadence
+  debounce_seconds: 600          # quiet period before firing a request
+  queue_dir: _watch_queue        # relative to sessions_root, or an absolute path
+  autopilot: false               # true => /mykg watch runs unsupervised
+  entries:
+    - session: Research
+      folder: 'C:\Users\oca\Documents\Obsidian Vault\Research'
+      base_schema: '.\src\mykg\data\ontokg-shipai.ttl'
+      obsidian_vault: false
+      enabled: false
+
+# ---------------------------------------------------------------------------
 # Profiles — each is fully self-contained: provider, credentials, and pipeline.
 # Set `profile:` above to activate one.
 # ---------------------------------------------------------------------------
