@@ -76,3 +76,54 @@ def test_state_roundtrip(tmp_path):
 
 def test_read_state_missing_returns_empty(tmp_path):
     assert watcher.read_state(tmp_path / "missing.json") == {}
+
+
+def _entry(tmp_path, **kw):
+    defaults = dict(session="Research", folder=tmp_path / "f")
+    defaults.update(kw)
+    return watcher.WatchEntry(**defaults)
+
+
+def test_build_request_shape(tmp_path):
+    from datetime import datetime, timezone
+
+    now = datetime(2026, 7, 29, 13, 20, 0, tzinfo=timezone.utc)
+    entry = _entry(tmp_path, base_schema="schema.ttl", obsidian_vault=True)
+    req = watcher.build_request(entry, ["b.md", "a.md"], autopilot=True, now=now)
+    assert req["request_id"] == "20260729T132000Z__Research"
+    assert req["session"] == "Research"
+    assert req["changed_files"] == ["a.md", "b.md"]  # sorted
+    assert req["command"] == {
+        "subcommand": "extract-graph",
+        "append": True,
+        "base_schema": "schema.ttl",
+        "obsidian_vault": True,
+    }
+    assert req["execution"] == {"mode": "autopilot", "on_error": "quarantine"}
+    assert req["created_by"] == "mykg-watch/1.0"
+
+
+def test_build_request_supervised_when_not_autopilot(tmp_path):
+    from datetime import datetime, timezone
+
+    now = datetime(2026, 7, 29, tzinfo=timezone.utc)
+    req = watcher.build_request(_entry(tmp_path), [], autopilot=False, now=now)
+    assert req["execution"]["mode"] == "supervised"
+    assert "base_schema" not in req["command"]
+
+
+def test_write_request_atomic_and_pending_dedupe(tmp_path):
+    from datetime import datetime, timezone
+
+    now = datetime(2026, 7, 29, 13, 20, 0, tzinfo=timezone.utc)
+    q = tmp_path / "queue"
+    req = watcher.build_request(_entry(tmp_path), ["a.md"], autopilot=False, now=now)
+    assert watcher.pending_request_exists(q, "Research") is False
+    path = watcher.write_request(q, req)
+    assert path.name == "20260729T132000Z__Research.request.json"
+    assert watcher.pending_request_exists(q, "Research") is True
+    # A different session is not seen as pending.
+    assert watcher.pending_request_exists(q, "Other") is False
+    # Content is valid UTF-8 JSON.
+    import json as _json
+    assert _json.loads(path.read_text(encoding="utf-8"))["session"] == "Research"

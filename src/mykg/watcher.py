@@ -131,3 +131,49 @@ def changed_set(current: dict[str, dict], previous: dict[str, dict]) -> set[str]
         if prev is None or prev.get("mtime") != meta["mtime"] or prev.get("size") != meta["size"]:
             changed.add(rel)
     return changed
+
+
+def request_id(session: str, now: datetime) -> str:
+    """Sortable timestamp + session, e.g. 20260729T132000Z__Research."""
+    return f"{now.strftime('%Y%m%dT%H%M%SZ')}__{session}"
+
+
+def build_request(
+    entry: WatchEntry, changed_files: list[str], autopilot: bool, now: datetime
+) -> dict:
+    """Build the extraction-request envelope for one session."""
+    command: dict = {"subcommand": "extract-graph", "append": True}
+    if entry.base_schema:
+        command["base_schema"] = entry.base_schema
+    command["obsidian_vault"] = entry.obsidian_vault
+    return {
+        "request_id": request_id(entry.session, now),
+        "session": entry.session,
+        "folder": str(entry.folder),
+        "changed_files": sorted(changed_files),
+        "command": command,
+        "execution": {
+            "mode": "autopilot" if autopilot else "supervised",
+            "on_error": "quarantine",
+        },
+        "created_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "created_by": CREATED_BY,
+    }
+
+
+def write_request(queue_dir: Path, request: dict) -> Path:
+    """Atomically write a request to the queue top-level. Returns the path."""
+    queue_dir.mkdir(parents=True, exist_ok=True)
+    path = queue_dir / f"{request['request_id']}.request.json"
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(request, indent=2), encoding="utf-8")
+    tmp.replace(path)
+    return path
+
+
+def pending_request_exists(queue_dir: Path, session: str) -> bool:
+    """True if an unprocessed request for this session sits at the queue top-level."""
+    if not queue_dir.exists():
+        return False
+    suffix = f"__{session}.request.json"
+    return any(p.name.endswith(suffix) for p in queue_dir.glob("*.request.json"))
