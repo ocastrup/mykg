@@ -168,6 +168,17 @@ SESSIONS_DIR: str = _user_paths["sessions_root"]
 WIKI_ROOT: str = _user_paths["wiki_root"]
 
 # ---------------------------------------------------------------------------
+# Watch — top-level `watch:` block (profile-independent). Defaults applied here
+# so the block's optional keys can be omitted.
+# ---------------------------------------------------------------------------
+_watch = RAW.get("watch", {}) or {}
+WATCH_POLL_INTERVAL_SECONDS: int = int(_watch.get("poll_interval_seconds", 300))
+WATCH_DEBOUNCE_SECONDS: int = int(_watch.get("debounce_seconds", 600))
+WATCH_QUEUE_DIR: str = str(_watch.get("queue_dir", "_watch_queue"))
+WATCH_AUTOPILOT: bool = bool(_watch.get("autopilot", False))
+WATCH_ENTRIES: list = list(_watch.get("entries", []) or [])
+
+# ---------------------------------------------------------------------------
 # Name normalization — Step 6b (D29)
 # ---------------------------------------------------------------------------
 NORMALIZE_NAMES_ENABLED: bool = _get("normalize_names", "enabled")
