@@ -11,8 +11,8 @@ profile: agent-claude-code
 # so switching `profile:` above never changes where your data lives.
 # ---------------------------------------------------------------------------
 paths:
-  sessions_root: kg_sessions   # parent for per-run session dirs (each run = timestamped subfolder)
-  wiki_root: kg_wiki           # build-wiki output: each session's wiki -> <wiki_root>/<session-name>/
+  sessions_root: 'C:\Users\oca\DNV\Yards - Documents\test-wiki\kg_sessions'   # parent for per-run session dirs (each run = timestamped subfolder)
+  wiki_root: 'C:\Users\oca\DNV\Yards - Documents\test-wiki\kg_wiki'           # build-wiki output: each session's wiki -> <wiki_root>/<session-name>/
 
 # ---------------------------------------------------------------------------
 # Profiles — each is fully self-contained: provider, credentials, and pipeline.
