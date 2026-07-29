@@ -88,3 +88,46 @@ def load_watch_config(raw: dict, sessions_root: Path) -> WatchConfig:
         autopilot=autopilot,
         entries=entries,
     )
+
+
+def scan_markdown(folder: Path) -> dict[str, dict]:
+    """Return {relpath: {mtime, size}} for all Markdown files under folder."""
+    state: dict[str, dict] = {}
+    if not folder.exists():
+        return state
+    for p in sorted(folder.rglob("*")):
+        if p.is_file() and p.suffix.lower() in MARKDOWN_SUFFIXES:
+            st = p.stat()
+            state[str(p.relative_to(folder))] = {"mtime": st.st_mtime, "size": st.st_size}
+    return state
+
+
+def read_state(state_path: Path) -> dict[str, dict]:
+    """Return the persisted {relpath: {mtime, size}} map, or {} if absent."""
+    if not state_path.exists():
+        return {}
+    data = json.loads(state_path.read_text(encoding="utf-8"))
+    return data.get("files", {})
+
+
+def write_state(state_path: Path, session: str, files: dict[str, dict], now: datetime) -> None:
+    """Atomically persist the enqueued snapshot for a session."""
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "session": session,
+        "last_enqueued": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "files": files,
+    }
+    tmp = state_path.with_suffix(state_path.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    tmp.replace(state_path)
+
+
+def changed_set(current: dict[str, dict], previous: dict[str, dict]) -> set[str]:
+    """Return relpaths that are new or whose (mtime, size) differs."""
+    changed: set[str] = set()
+    for rel, meta in current.items():
+        prev = previous.get(rel)
+        if prev is None or prev.get("mtime") != meta["mtime"] or prev.get("size") != meta["size"]:
+            changed.add(rel)
+    return changed

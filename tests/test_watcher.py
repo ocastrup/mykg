@@ -39,3 +39,40 @@ def test_load_watch_config_entry_missing_session_raises(tmp_path):
     raw = {"watch": {"entries": [{"folder": "x"}]}}
     with pytest.raises(ValueError):
         watcher.load_watch_config(raw, sessions_root=tmp_path)
+
+
+def test_scan_markdown_finds_md_recursively(tmp_path):
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "a.md").write_text("x", encoding="utf-8")
+    (tmp_path / "sub" / "b.markdown").write_text("y", encoding="utf-8")
+    (tmp_path / "c.txt").write_text("z", encoding="utf-8")
+    state = watcher.scan_markdown(tmp_path)
+    assert set(state) == {"a.md", str(Path("sub") / "b.markdown")}
+    assert set(state["a.md"]) == {"mtime", "size"}
+
+
+def test_scan_markdown_missing_folder_returns_empty(tmp_path):
+    assert watcher.scan_markdown(tmp_path / "nope") == {}
+
+
+def test_changed_set_detects_new_and_modified():
+    prev = {"a.md": {"mtime": 1.0, "size": 10}, "b.md": {"mtime": 2.0, "size": 20}}
+    cur = {
+        "a.md": {"mtime": 1.0, "size": 10},   # unchanged
+        "b.md": {"mtime": 2.0, "size": 21},   # size changed
+        "c.md": {"mtime": 3.0, "size": 30},   # new
+    }
+    assert watcher.changed_set(cur, prev) == {"b.md", "c.md"}
+
+
+def test_state_roundtrip(tmp_path):
+    from datetime import datetime, timezone
+
+    sp = tmp_path / "_state" / "S.state.json"
+    files = {"a.md": {"mtime": 1.0, "size": 10}}
+    watcher.write_state(sp, "S", files, datetime(2026, 7, 29, tzinfo=timezone.utc))
+    assert watcher.read_state(sp) == files
+
+
+def test_read_state_missing_returns_empty(tmp_path):
+    assert watcher.read_state(tmp_path / "missing.json") == {}
