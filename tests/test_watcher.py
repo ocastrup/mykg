@@ -224,3 +224,57 @@ def test_poll_once_coalesces_when_pending(tmp_path):
         trackers={}, skip_debounce=True,
     )
     assert enq == []  # coalesced: did not enqueue a second request
+
+
+def test_scan_markdown_skips_vanished_file(tmp_path, monkeypatch):
+    (tmp_path / "a.md").write_text("x", encoding="utf-8")
+    (tmp_path / "b.md").write_text("y", encoding="utf-8")
+    real_stat = watcher.Path.stat
+
+    def flaky_stat(self, *a, **k):
+        if self.name == "a.md":
+            raise FileNotFoundError(str(self))
+        return real_stat(self, *a, **k)
+
+    monkeypatch.setattr(watcher.Path, "stat", flaky_stat)
+    state = watcher.scan_markdown(tmp_path)
+    assert set(state) == {"b.md"}  # vanished a.md skipped, no crash
+
+
+def test_read_state_corrupt_returns_empty(tmp_path):
+    sp = tmp_path / "corrupt.state.json"
+    sp.write_text("{ this is not valid json", encoding="utf-8")
+    assert watcher.read_state(sp) == {}
+
+
+def test_poll_once_isolates_entry_errors(tmp_path, monkeypatch):
+    sessions = tmp_path / "sessions"
+    _make_session(sessions, "Bad")
+    _make_session(sessions, "Good")
+    bad = tmp_path / "bad"
+    bad.mkdir()
+    good = tmp_path / "good"
+    good.mkdir()
+    (bad / "a.md").write_text("x", encoding="utf-8")
+    (good / "b.md").write_text("y", encoding="utf-8")
+
+    real_scan = watcher.scan_markdown
+
+    def flaky_scan(folder):
+        if folder == bad:
+            raise RuntimeError("boom")
+        return real_scan(folder)
+
+    monkeypatch.setattr(watcher, "scan_markdown", flaky_scan)
+    cfg = _cfg(
+        tmp_path,
+        [
+            watcher.WatchEntry(session="Bad", folder=bad),
+            watcher.WatchEntry(session="Good", folder=good),
+        ],
+    )
+    enq = watcher.poll_once(
+        cfg, sessions, now_wall=datetime(2026, 7, 29, tzinfo=timezone.utc),
+        now_mono=100.0, trackers={}, skip_debounce=True,
+    )
+    assert enq == ["Good"]  # Bad raised but did not crash or block Good

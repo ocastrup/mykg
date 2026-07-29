@@ -98,17 +98,31 @@ def scan_markdown(folder: Path) -> dict[str, dict]:
     if not folder.exists():
         return state
     for p in sorted(folder.rglob("*")):
-        if p.is_file() and p.suffix.lower() in MARKDOWN_SUFFIXES:
+        try:
+            if not (p.is_file() and p.suffix.lower() in MARKDOWN_SUFFIXES):
+                continue
             st = p.stat()
-            state[str(p.relative_to(folder))] = {"mtime": st.st_mtime, "size": st.st_size}
+        except OSError:
+            # File vanished/renamed between enumeration and stat (common in an
+            # actively-edited vault) — skip it; it reappears next scan if real.
+            continue
+        state[str(p.relative_to(folder))] = {"mtime": st.st_mtime, "size": st.st_size}
     return state
 
 
 def read_state(state_path: Path) -> dict[str, dict]:
-    """Return the persisted {relpath: {mtime, size}} map, or {} if absent."""
+    """Return the persisted {relpath: {mtime, size}} map, or {} if absent.
+
+    A corrupt or unreadable manifest degrades to {} (treat everything as changed)
+    rather than wedging the daemon on every poll.
+    """
     if not state_path.exists():
         return {}
-    data = json.loads(state_path.read_text(encoding="utf-8"))
+    try:
+        data = json.loads(state_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError) as exc:
+        log.warning("watch: unreadable state file %s (%s) — treating as empty", state_path, exc)
+        return {}
     return data.get("files", {})
 
 
@@ -207,57 +221,67 @@ def poll_once(
     enqueued: list[str] = []
     state_dir = cfg.queue_dir / "_state"
     for entry in cfg.entries:
-        if not entry.enabled:
-            continue
-        if not (sessions_root / entry.session).exists():
-            log.warning(
-                "watch: session '%s' not found under %s — skipping (create it first)",
-                entry.session, sessions_root,
-            )
-            continue
-        if not entry.folder.exists():
-            log.warning(
-                "watch: folder %s for session '%s' not found — skipping",
-                entry.folder, entry.session,
-            )
-            continue
+        try:
+            if not entry.enabled:
+                continue
+            if not (sessions_root / entry.session).exists():
+                log.warning(
+                    "watch: session '%s' not found under %s — skipping (create it first)",
+                    entry.session, sessions_root,
+                )
+                continue
+            if not entry.folder.exists():
+                log.warning(
+                    "watch: folder %s for session '%s' not found — skipping",
+                    entry.folder, entry.session,
+                )
+                continue
 
-        current = scan_markdown(entry.folder)
-        state_path = state_dir / f"{entry.session}.state.json"
-        previous = read_state(state_path)
-        changed = changed_set(current, previous)
-        tracker = trackers.setdefault(entry.session, DebounceState())
+            current = scan_markdown(entry.folder)
+            state_path = state_dir / f"{entry.session}.state.json"
+            previous = read_state(state_path)
+            changed = changed_set(current, previous)
+            tracker = trackers.setdefault(entry.session, DebounceState())
 
-        if not changed:
-            tracker.last_snapshot = current
+            if not changed:
+                tracker.last_snapshot = current
+                tracker.last_change_at = None
+                continue
+
+            # (Re)start the debounce timer whenever the changed snapshot moves.
+            if current != tracker.last_snapshot:
+                tracker.last_snapshot = current
+                tracker.last_change_at = now_mono
+
+            quiet_ok = skip_debounce or (
+                tracker.last_change_at is not None
+                and (now_mono - tracker.last_change_at) >= cfg.debounce_seconds
+            )
+            if not quiet_ok:
+                continue
+
+            if pending_request_exists(cfg.queue_dir, entry.session):
+                log.info("watch: session '%s' already pending — coalescing", entry.session)
+                continue
+
+            request = build_request(entry, sorted(changed), cfg.autopilot, now_wall)
+            write_request(cfg.queue_dir, request)
+            write_state(state_path, entry.session, current, now_wall)
             tracker.last_change_at = None
+            enqueued.append(entry.session)
+            log.info(
+                "watch: enqueued request for session '%s' (%d changed file(s))",
+                entry.session, len(changed),
+            )
+        except Exception:
+            # Isolate per-entry failures: one bad session must not crash the
+            # daemon or block the remaining entries in this cycle.
+            log.exception(
+                "watch: unexpected error processing session '%s' — skipping this cycle",
+                entry.session,
+            )
             continue
-
-        # (Re)start the debounce timer whenever the changed snapshot moves.
-        if current != tracker.last_snapshot:
-            tracker.last_snapshot = current
-            tracker.last_change_at = now_mono
-
-        quiet_ok = skip_debounce or (
-            tracker.last_change_at is not None
-            and (now_mono - tracker.last_change_at) >= cfg.debounce_seconds
-        )
-        if not quiet_ok:
-            continue
-
-        if pending_request_exists(cfg.queue_dir, entry.session):
-            log.info("watch: session '%s' already pending — coalescing", entry.session)
-            continue
-
-        request = build_request(entry, sorted(changed), cfg.autopilot, now_wall)
-        write_request(cfg.queue_dir, request)
-        write_state(state_path, entry.session, current, now_wall)
-        tracker.last_change_at = None
-        enqueued.append(entry.session)
-        log.info(
-            "watch: enqueued request for session '%s' (%d changed file(s))",
-            entry.session, len(changed),
-        )
+    return enqueued
     return enqueued
 
 
