@@ -127,3 +127,100 @@ def test_write_request_atomic_and_pending_dedupe(tmp_path):
     # Content is valid UTF-8 JSON.
     import json as _json
     assert _json.loads(path.read_text(encoding="utf-8"))["session"] == "Research"
+
+
+from datetime import datetime, timezone
+
+
+def _cfg(tmp_path, entries, debounce=600, autopilot=False):
+    return watcher.WatchConfig(
+        poll_interval_seconds=300,
+        debounce_seconds=debounce,
+        queue_dir=tmp_path / "queue",
+        autopilot=autopilot,
+        entries=entries,
+    )
+
+
+def _make_session(sessions_root: Path, name: str) -> None:
+    (sessions_root / name).mkdir(parents=True, exist_ok=True)
+
+
+def test_poll_once_skips_missing_session(tmp_path):
+    sessions = tmp_path / "sessions"
+    folder = tmp_path / "watch"
+    folder.mkdir(parents=True)
+    (folder / "a.md").write_text("x", encoding="utf-8")
+    cfg = _cfg(tmp_path, [watcher.WatchEntry(session="Ghost", folder=folder)])
+    enq = watcher.poll_once(
+        cfg, sessions, now_wall=datetime.now(timezone.utc), now_mono=100.0,
+        trackers={}, skip_debounce=True,
+    )
+    assert enq == []  # session dir does not exist
+
+
+def test_poll_once_enqueues_when_debounce_skipped(tmp_path):
+    sessions = tmp_path / "sessions"
+    _make_session(sessions, "Research")
+    folder = tmp_path / "watch"
+    folder.mkdir(parents=True)
+    (folder / "a.md").write_text("x", encoding="utf-8")
+    cfg = _cfg(tmp_path, [watcher.WatchEntry(session="Research", folder=folder)])
+    enq = watcher.poll_once(
+        cfg, sessions, now_wall=datetime(2026, 7, 29, tzinfo=timezone.utc),
+        now_mono=100.0, trackers={}, skip_debounce=True,
+    )
+    assert enq == ["Research"]
+    assert watcher.pending_request_exists(cfg.queue_dir, "Research")
+    # State written so a second identical scan enqueues nothing.
+    enq2 = watcher.poll_once(
+        cfg, sessions, now_wall=datetime(2026, 7, 29, tzinfo=timezone.utc),
+        now_mono=200.0, trackers={}, skip_debounce=True,
+    )
+    assert enq2 == []
+
+
+def test_poll_once_debounce_waits_for_quiet(tmp_path):
+    sessions = tmp_path / "sessions"
+    _make_session(sessions, "Research")
+    folder = tmp_path / "watch"
+    folder.mkdir(parents=True)
+    (folder / "a.md").write_text("x", encoding="utf-8")
+    cfg = _cfg(tmp_path, [watcher.WatchEntry(session="Research", folder=folder)], debounce=600)
+    trackers: dict = {}
+    # First cycle: change seen, timer starts, debounce not satisfied.
+    enq = watcher.poll_once(
+        cfg, sessions, now_wall=datetime.now(timezone.utc), now_mono=1000.0,
+        trackers=trackers, skip_debounce=False,
+    )
+    assert enq == []
+    # Second cycle within debounce window: still waiting.
+    enq = watcher.poll_once(
+        cfg, sessions, now_wall=datetime.now(timezone.utc), now_mono=1300.0,
+        trackers=trackers, skip_debounce=False,
+    )
+    assert enq == []
+    # Third cycle after quiet period elapsed: fires.
+    enq = watcher.poll_once(
+        cfg, sessions, now_wall=datetime.now(timezone.utc), now_mono=1601.0,
+        trackers=trackers, skip_debounce=False,
+    )
+    assert enq == ["Research"]
+
+
+def test_poll_once_coalesces_when_pending(tmp_path):
+    sessions = tmp_path / "sessions"
+    _make_session(sessions, "Research")
+    folder = tmp_path / "watch"
+    folder.mkdir(parents=True)
+    (folder / "a.md").write_text("x", encoding="utf-8")
+    cfg = _cfg(tmp_path, [watcher.WatchEntry(session="Research", folder=folder)])
+    # Pre-seed a pending request.
+    watcher.write_request(cfg.queue_dir, watcher.build_request(
+        watcher.WatchEntry(session="Research", folder=folder), ["a.md"],
+        autopilot=False, now=datetime(2026, 7, 28, tzinfo=timezone.utc)))
+    enq = watcher.poll_once(
+        cfg, sessions, now_wall=datetime.now(timezone.utc), now_mono=100.0,
+        trackers={}, skip_debounce=True,
+    )
+    assert enq == []  # coalesced: did not enqueue a second request

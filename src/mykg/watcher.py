@@ -177,3 +177,83 @@ def pending_request_exists(queue_dir: Path, session: str) -> bool:
         return False
     suffix = f"__{session}.request.json"
     return any(p.name.endswith(suffix) for p in queue_dir.glob("*.request.json"))
+
+
+
+@dataclass
+class DebounceState:
+    last_snapshot: dict[str, dict] = field(default_factory=dict)
+    last_change_at: float | None = None
+
+
+def poll_once(
+    cfg: WatchConfig,
+    sessions_root: Path,
+    *,
+    now_wall: datetime,
+    now_mono: float,
+    trackers: dict[str, "DebounceState"],
+    skip_debounce: bool = False,
+) -> list[str]:
+    """Run one scan/enqueue cycle across all entries. Returns enqueued session names.
+
+    ``now_wall`` is a timezone-aware datetime for request/state stamps.
+    ``now_mono`` is a monotonic seconds value for debounce math.
+    ``trackers`` is mutated in place to carry debounce state across cycles.
+    ``skip_debounce`` fires immediately on any change (used by ``--once``).
+    """
+    enqueued: list[str] = []
+    state_dir = cfg.queue_dir / "_state"
+    for entry in cfg.entries:
+        if not entry.enabled:
+            continue
+        if not (sessions_root / entry.session).exists():
+            log.warning(
+                "watch: session '%s' not found under %s — skipping (create it first)",
+                entry.session, sessions_root,
+            )
+            continue
+        if not entry.folder.exists():
+            log.warning(
+                "watch: folder %s for session '%s' not found — skipping",
+                entry.folder, entry.session,
+            )
+            continue
+
+        current = scan_markdown(entry.folder)
+        state_path = state_dir / f"{entry.session}.state.json"
+        previous = read_state(state_path)
+        changed = changed_set(current, previous)
+        tracker = trackers.setdefault(entry.session, DebounceState())
+
+        if not changed:
+            tracker.last_snapshot = current
+            tracker.last_change_at = None
+            continue
+
+        # (Re)start the debounce timer whenever the changed snapshot moves.
+        if current != tracker.last_snapshot:
+            tracker.last_snapshot = current
+            tracker.last_change_at = now_mono
+
+        quiet_ok = skip_debounce or (
+            tracker.last_change_at is not None
+            and (now_mono - tracker.last_change_at) >= cfg.debounce_seconds
+        )
+        if not quiet_ok:
+            continue
+
+        if pending_request_exists(cfg.queue_dir, entry.session):
+            log.info("watch: session '%s' already pending — coalescing", entry.session)
+            continue
+
+        request = build_request(entry, sorted(changed), cfg.autopilot, now_wall)
+        write_request(cfg.queue_dir, request)
+        write_state(state_path, entry.session, current, now_wall)
+        tracker.last_change_at = None
+        enqueued.append(entry.session)
+        log.info(
+            "watch: enqueued request for session '%s' (%d changed file(s))",
+            entry.session, len(changed),
+        )
+    return enqueued
