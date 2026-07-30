@@ -212,18 +212,22 @@ def test_ollama_adapter_complete_with_max_tokens():
             timeout=120,
             stream=False,
             max_tokens=8096,
+            context_window=64000,
             retry_429_max=3,
             retry_429_base_delay=1.0,
         )
         result = adapter.complete("system prompt", "user prompt")
 
     assert result == "hello"
-    # Verify the payload includes options with num_predict
+    # Verify the payload includes options with num_predict and num_ctx
     call_args = mock_urlopen.call_args
     request = call_args[0][0]
     payload = json.loads(request.data.decode())
     assert "options" in payload
     assert payload["options"]["num_predict"] == 8096
+    # num_ctx must be sent so large prompts are not truncated by Ollama's
+    # small default context window.
+    assert payload["options"]["num_ctx"] == 64000
 
 
 def test_ollama_adapter_stores_max_tokens():
@@ -236,6 +240,7 @@ def test_ollama_adapter_stores_max_tokens():
         timeout=120,
         stream=False,
         max_tokens=4096,
+        context_window=64000,
         retry_429_max=3,
         retry_429_base_delay=1.0,
     )
@@ -252,6 +257,7 @@ def test_config_creates_ollama_adapter_with_max_tokens():
             "timeout": 120,
             "stream": False,
             "max_output_tokens": 8096,
+            "context_window": 64000,
             "retry_429_max": 3,
             "retry_429_base_delay": 1.0,
         },
@@ -264,6 +270,7 @@ def test_config_creates_ollama_adapter_with_max_tokens():
     assert isinstance(adapter, OllamaAdapter)
     assert adapter._model == "gemma4:31b"
     assert adapter._max_tokens == 8096
+    assert adapter._context_window == 64000
 
 
 # ---------------------------------------------------------------------------
@@ -291,6 +298,7 @@ def _ollama_adapter(retry_max: int = 3, base_delay: float = 1.0) -> "OllamaAdapt
         timeout=30,
         stream=False,
         max_tokens=4096,
+        context_window=64000,
         retry_429_max=retry_max,
         retry_429_base_delay=base_delay,
     )
@@ -594,6 +602,7 @@ def test_config_load_adapter_ollama_passes_retry_429():
             "timeout": 120,
             "stream": False,
             "max_output_tokens": 8096,
+            "context_window": 64000,
             "retry_429_max": 7,
             "retry_429_base_delay": 3.0,
         },
@@ -1216,3 +1225,820 @@ def test_openrouter_live_call_respects_timeout():
     print(f"[live] tight timeout raised: {type(exc_info.value).__name__}: {exc_info.value}")
     # Accept any exception — the SDK raises openai.APITimeoutError or httpx.ReadTimeout
     assert exc_info.value is not None
+
+
+# ── finish_reason (truncation) detection ─────────────────────────────────────
+
+
+def test_anthropic_adapter_truncated_response_logs_finish_reason():
+    """stop_reason == 'max_tokens' is surfaced as finish_reason='max_tokens'."""
+    truncated_block = MagicMock()
+    truncated_block.text = "{ incomplete json"
+    truncated_response = MagicMock()
+    truncated_response.content = [truncated_block]
+    truncated_response.stop_reason = "max_tokens"
+
+    with (
+        patch("anthropic.Anthropic") as mock_cls,
+        patch("mykg.llm.anthropic_adapter.record_llm_call") as mock_record,
+    ):
+        mock_client = MagicMock()
+        mock_cls.return_value = mock_client
+        mock_client.messages.create.return_value = truncated_response
+
+        from mykg.llm.anthropic_adapter import AnthropicAdapter
+
+        adapter = AnthropicAdapter(
+            model="claude-sonnet-4-6", max_tokens=10, timeout=10, api_key="test-key"
+        )
+        adapter.complete("sys", "user")
+
+    assert mock_record.call_args.kwargs.get("finish_reason") == "max_tokens"
+
+
+def test_anthropic_adapter_normal_response_omits_finish_reason():
+    """stop_reason == 'end_turn' does not set finish_reason."""
+    ok_block = MagicMock()
+    ok_block.text = "{}"
+    ok_response = MagicMock()
+    ok_response.content = [ok_block]
+    ok_response.stop_reason = "end_turn"
+
+    with (
+        patch("anthropic.Anthropic") as mock_cls,
+        patch("mykg.llm.anthropic_adapter.record_llm_call") as mock_record,
+    ):
+        mock_client = MagicMock()
+        mock_cls.return_value = mock_client
+        mock_client.messages.create.return_value = ok_response
+
+        from mykg.llm.anthropic_adapter import AnthropicAdapter
+
+        adapter = AnthropicAdapter(
+            model="claude-sonnet-4-6", max_tokens=10, timeout=10, api_key="test-key"
+        )
+        adapter.complete("sys", "user")
+
+    assert mock_record.call_args.kwargs.get("finish_reason") is None
+
+
+def test_anthropic_adapter_context_exceeded_logs_and_reraises():
+    """A context-length-exceeded APIStatusError is logged with a marker and re-raised."""
+    import anthropic
+
+    api_err = anthropic.APIStatusError(
+        message="prompt is too long: 250000 tokens > 200000 maximum",
+        response=MagicMock(status_code=400, headers={}),
+        body={"error": {"message": "prompt is too long: 250000 tokens > 200000 maximum"}},
+    )
+
+    with (
+        patch("anthropic.Anthropic") as mock_cls,
+        patch("mykg.llm.anthropic_adapter.record_llm_call") as mock_record,
+    ):
+        mock_client = MagicMock()
+        mock_cls.return_value = mock_client
+        mock_client.messages.create.side_effect = api_err
+
+        from mykg.llm.anthropic_adapter import AnthropicAdapter
+
+        adapter = AnthropicAdapter(
+            model="claude-sonnet-4-6", max_tokens=10, timeout=10, api_key="test-key"
+        )
+        with pytest.raises(anthropic.APIStatusError):
+            adapter.complete("sys", "user")
+
+    call_kwargs_list = [c.kwargs for c in mock_record.call_args_list]
+    assert any(
+        "context_length_exceeded" in str(k.get("error", "")) for k in call_kwargs_list
+    )
+
+
+def test_openai_adapter_truncated_response_logs_finish_reason():
+    """finish_reason == 'length' is surfaced as finish_reason='length'."""
+    mock_response = MagicMock()
+    mock_response.choices[0].message.content = "{ incomplete"
+    mock_response.choices[0].finish_reason = "length"
+
+    with (
+        patch("openai.OpenAI") as mock_client_cls,
+        patch("mykg.llm.openai_adapter.record_llm_call") as mock_record,
+    ):
+        mock_client = MagicMock()
+        mock_client_cls.return_value = mock_client
+        mock_client.chat.completions.create.return_value = mock_response
+
+        from mykg.llm.openai_adapter import OpenAIAdapter
+
+        adapter = OpenAIAdapter(model="gpt-4o", max_tokens=10, timeout=30, api_key="test-key")
+        adapter.complete("system prompt", "user prompt")
+
+    assert mock_record.call_args.kwargs.get("finish_reason") == "length"
+
+
+def test_openai_adapter_normal_response_omits_finish_reason():
+    """finish_reason == 'stop' does not set finish_reason."""
+    mock_response = MagicMock()
+    mock_response.choices[0].message.content = "hello"
+    mock_response.choices[0].finish_reason = "stop"
+
+    with (
+        patch("openai.OpenAI") as mock_client_cls,
+        patch("mykg.llm.openai_adapter.record_llm_call") as mock_record,
+    ):
+        mock_client = MagicMock()
+        mock_client_cls.return_value = mock_client
+        mock_client.chat.completions.create.return_value = mock_response
+
+        from mykg.llm.openai_adapter import OpenAIAdapter
+
+        adapter = OpenAIAdapter(model="gpt-4o", max_tokens=10, timeout=30, api_key="test-key")
+        adapter.complete("system prompt", "user prompt")
+
+    assert mock_record.call_args.kwargs.get("finish_reason") is None
+
+
+def test_openai_adapter_context_exceeded_logs_and_reraises():
+    """A context-length-exceeded BadRequestError is logged with a marker and re-raised."""
+    import openai
+
+    api_err = openai.BadRequestError(
+        message="This model's maximum context length is 128000 tokens",
+        response=MagicMock(status_code=400, headers={}),
+        body={
+            "error": {
+                "message": "This model's maximum context length is 128000 tokens",
+            }
+        },
+    )
+
+    with (
+        patch("openai.OpenAI") as mock_cls,
+        patch("mykg.llm.openai_adapter.record_llm_call") as mock_record,
+    ):
+        mock_client = MagicMock()
+        mock_cls.return_value = mock_client
+        mock_client.chat.completions.create.side_effect = api_err
+
+        from mykg.llm.openai_adapter import OpenAIAdapter
+
+        adapter = OpenAIAdapter(model="gpt-4o", max_tokens=10, timeout=30, api_key="test-key")
+        with pytest.raises(openai.BadRequestError):
+            adapter.complete("sys", "user")
+
+    call_kwargs_list = [c.kwargs for c in mock_record.call_args_list]
+    assert any(
+        "context_length_exceeded" in str(k.get("error", "")) for k in call_kwargs_list
+    )
+
+
+def test_openrouter_adapter_truncated_response_logs_finish_reason():
+    """finish_reason == 'length' is surfaced as finish_reason='length'."""
+    mock_response = MagicMock()
+    mock_response.choices[0].message.content = "{ incomplete"
+    mock_response.choices[0].finish_reason = "length"
+
+    with (
+        patch("openai.OpenAI") as mock_client_cls,
+        patch("mykg.llm.openrouter_adapter.record_llm_call") as mock_record,
+    ):
+        mock_client = MagicMock()
+        mock_client_cls.return_value = mock_client
+        mock_client.chat.completions.create.return_value = mock_response
+
+        from mykg.llm.openrouter_adapter import OpenRouterAdapter
+
+        adapter = OpenRouterAdapter(model="m", max_tokens=10, timeout=10, api_key="test-key")
+        adapter.complete("s", "u")
+
+    assert mock_record.call_args.kwargs.get("finish_reason") == "length"
+
+
+def test_openrouter_adapter_normal_response_omits_finish_reason():
+    """finish_reason == 'stop' does not set finish_reason."""
+    mock_response = MagicMock()
+    mock_response.choices[0].message.content = "hello"
+    mock_response.choices[0].finish_reason = "stop"
+
+    with (
+        patch("openai.OpenAI") as mock_client_cls,
+        patch("mykg.llm.openrouter_adapter.record_llm_call") as mock_record,
+    ):
+        mock_client = MagicMock()
+        mock_client_cls.return_value = mock_client
+        mock_client.chat.completions.create.return_value = mock_response
+
+        from mykg.llm.openrouter_adapter import OpenRouterAdapter
+
+        adapter = OpenRouterAdapter(model="m", max_tokens=10, timeout=10, api_key="test-key")
+        adapter.complete("s", "u")
+
+    assert mock_record.call_args.kwargs.get("finish_reason") is None
+
+
+def test_openrouter_adapter_context_exceeded_marks_error():
+    """A context-length-exceeded 4xx APIStatusError gets the marker prefix on error."""
+    import openai
+
+    api_err = openai.APIStatusError(
+        message="maximum context length exceeded",
+        response=MagicMock(status_code=400, headers={}),
+        body={"error": {"message": "maximum context length exceeded"}},
+    )
+
+    with (
+        patch("openai.OpenAI") as mock_cls,
+        patch("mykg.llm.openrouter_adapter.record_llm_call") as mock_record,
+    ):
+        mock_client = MagicMock()
+        mock_cls.return_value = mock_client
+        mock_client.chat.completions.create.side_effect = api_err
+
+        from mykg.llm.openrouter_adapter import OpenRouterAdapter
+
+        adapter = OpenRouterAdapter(
+            model="m", max_tokens=10, timeout=10, api_key="test-key", retry_429_max=0
+        )
+        with pytest.raises(openai.APIStatusError):
+            adapter.complete("s", "u")
+
+    call_kwargs_list = [c.kwargs for c in mock_record.call_args_list]
+    assert any(
+        "context_length_exceeded" in str(k.get("error", "")) for k in call_kwargs_list
+    )
+
+
+def test_ollama_adapter_truncated_response_logs_finish_reason():
+    """done_reason == 'length' is surfaced as finish_reason='length'."""
+    mock_response = MagicMock()
+    mock_response.read.return_value = json.dumps(
+        {"response": "trunc", "done_reason": "length"}
+    ).encode()
+
+    with (
+        patch("urllib.request.urlopen") as mock_urlopen,
+        patch("mykg.llm.ollama_adapter.record_llm_call") as mock_record,
+    ):
+        mock_urlopen.return_value.__enter__.return_value = mock_response
+
+        from mykg.llm.ollama_adapter import OllamaAdapter
+
+        adapter = OllamaAdapter(
+            model="gemma4:31b",
+            base_url="http://localhost:11434",
+            timeout=120,
+            stream=False,
+            max_tokens=10,
+            context_window=64000,
+        )
+        adapter.complete("system prompt", "user prompt")
+
+    assert mock_record.call_args.kwargs.get("finish_reason") == "length"
+
+
+def test_ollama_adapter_normal_response_omits_finish_reason():
+    """done_reason == 'stop' does not set finish_reason."""
+    mock_response = MagicMock()
+    mock_response.read.return_value = json.dumps(
+        {"response": "hello", "done_reason": "stop"}
+    ).encode()
+
+    with (
+        patch("urllib.request.urlopen") as mock_urlopen,
+        patch("mykg.llm.ollama_adapter.record_llm_call") as mock_record,
+    ):
+        mock_urlopen.return_value.__enter__.return_value = mock_response
+
+        from mykg.llm.ollama_adapter import OllamaAdapter
+
+        adapter = OllamaAdapter(
+            model="gemma4:31b",
+            base_url="http://localhost:11434",
+            timeout=120,
+            stream=False,
+            max_tokens=10,
+            context_window=64000,
+        )
+        adapter.complete("system prompt", "user prompt")
+
+    assert mock_record.call_args.kwargs.get("finish_reason") is None
+
+
+def test_ollama_adapter_context_exceeded_http_error_logs_and_reraises():
+    """A context-length-exceeded HTTPError is logged with a marker and re-raised."""
+    # looks_like_context_exceeded matches on str(exc), which for HTTPError is
+    # "HTTP Error <code>: <msg>" — the marker must be in msg, not the body.
+    exc = urllib.error.HTTPError(
+        url="http://localhost:11434/api/generate",
+        code=400,
+        msg="maximum context length exceeded",
+        hdrs=None,  # type: ignore[arg-type]
+        fp=io.BytesIO(b""),
+    )
+
+    with (
+        patch("urllib.request.urlopen", side_effect=exc),
+        patch("mykg.llm.ollama_adapter.record_llm_call") as mock_record,
+    ):
+        adapter = _ollama_adapter(retry_max=0)
+        with pytest.raises(RuntimeError, match="Ollama request failed"):
+            adapter.complete("sys", "user")
+
+    call_kwargs_list = [c.kwargs for c in mock_record.call_args_list]
+    assert any(
+        "context_length_exceeded" in str(k.get("error", "")) for k in call_kwargs_list
+    )
+
+
+def test_ollama_adapter_context_exceeded_url_error_logs_and_reraises():
+    """A context-length-exceeded URLError is logged with a marker and re-raised."""
+    exc = urllib.error.URLError("maximum context length exceeded")
+
+    with (
+        patch("urllib.request.urlopen", side_effect=exc),
+        patch("mykg.llm.ollama_adapter.record_llm_call") as mock_record,
+    ):
+        adapter = _ollama_adapter(retry_max=0)
+        with pytest.raises(RuntimeError, match="Ollama request failed"):
+            adapter.complete("sys", "user")
+
+    call_kwargs_list = [c.kwargs for c in mock_record.call_args_list]
+    assert any(
+        "context_length_exceeded" in str(k.get("error", "")) for k in call_kwargs_list
+    )
+
+
+def test_ollama_adapter_non_context_url_error_not_logged():
+    """A plain URLError unrelated to context overflow does not get the marker."""
+    exc = urllib.error.URLError("connection refused")
+
+    with (
+        patch("urllib.request.urlopen", side_effect=exc),
+        patch("mykg.llm.ollama_adapter.record_llm_call") as mock_record,
+    ):
+        adapter = _ollama_adapter(retry_max=0)
+        with pytest.raises(RuntimeError, match="Ollama request failed"):
+            adapter.complete("sys", "user")
+
+    mock_record.assert_not_called()
+
+
+def test_looks_like_context_exceeded_matches_known_markers():
+    """The shared heuristic matches common cross-provider context-overflow phrasing."""
+    from mykg.llm.retry import looks_like_context_exceeded
+
+    assert looks_like_context_exceeded(Exception("maximum context length is 128000 tokens"))
+    assert looks_like_context_exceeded(Exception("prompt is too long for this model"))
+    assert looks_like_context_exceeded(RuntimeError("n_ctx exceeded"))
+    assert not looks_like_context_exceeded(Exception("rate limit exceeded"))
+    assert not looks_like_context_exceeded(Exception("connection refused"))
+
+
+# ── run.log warnings for finish_reason / context-overflow (independent of llm.log) ──
+
+
+def test_anthropic_truncation_warns_on_standard_logger(caplog):
+    """Truncated output is warned via mykg.llm.retry's logger, reaching run.log
+    regardless of the llm_log/LOG_LLM_LOG toggle."""
+    truncated_block = MagicMock()
+    truncated_block.text = "{ incomplete"
+    truncated_response = MagicMock()
+    truncated_response.content = [truncated_block]
+    truncated_response.stop_reason = "max_tokens"
+
+    with patch("anthropic.Anthropic") as mock_cls, caplog.at_level("WARNING", logger="mykg.llm.retry"):
+        mock_client = MagicMock()
+        mock_cls.return_value = mock_client
+        mock_client.messages.create.return_value = truncated_response
+
+        from mykg.llm.anthropic_adapter import AnthropicAdapter
+
+        adapter = AnthropicAdapter(
+            model="claude-sonnet-4-6", max_tokens=10, timeout=10, api_key="test-key"
+        )
+        adapter.complete("sys", "user", context_label="ctx-1")
+
+    assert any("output truncated" in r.message for r in caplog.records)
+    assert any("anthropic/claude-sonnet-4-6" in r.message for r in caplog.records)
+
+
+def test_anthropic_normal_completion_emits_no_warning(caplog):
+    """A clean completion must not emit a truncation/overflow warning."""
+    ok_block = MagicMock()
+    ok_block.text = "{}"
+    ok_response = MagicMock()
+    ok_response.content = [ok_block]
+    ok_response.stop_reason = "end_turn"
+
+    with patch("anthropic.Anthropic") as mock_cls, caplog.at_level("WARNING", logger="mykg.llm.retry"):
+        mock_client = MagicMock()
+        mock_cls.return_value = mock_client
+        mock_client.messages.create.return_value = ok_response
+
+        from mykg.llm.anthropic_adapter import AnthropicAdapter
+
+        adapter = AnthropicAdapter(
+            model="claude-sonnet-4-6", max_tokens=10, timeout=10, api_key="test-key"
+        )
+        adapter.complete("sys", "user")
+
+    assert caplog.records == []
+
+
+def test_anthropic_context_overflow_warns_on_standard_logger(caplog):
+    """A context-length-exceeded APIStatusError is warned before re-raising."""
+    import anthropic
+
+    api_err = anthropic.APIStatusError(
+        message="prompt is too long: 250000 tokens > 200000 maximum",
+        response=MagicMock(status_code=400, headers={}),
+        body={"error": {"message": "prompt is too long: 250000 tokens > 200000 maximum"}},
+    )
+
+    with (
+        patch("anthropic.Anthropic") as mock_cls,
+        caplog.at_level("WARNING", logger="mykg.llm.retry"),
+    ):
+        mock_client = MagicMock()
+        mock_cls.return_value = mock_client
+        mock_client.messages.create.side_effect = api_err
+
+        from mykg.llm.anthropic_adapter import AnthropicAdapter
+
+        adapter = AnthropicAdapter(
+            model="claude-sonnet-4-6", max_tokens=10, timeout=10, api_key="test-key"
+        )
+        with pytest.raises(anthropic.APIStatusError):
+            adapter.complete("sys", "user", context_label="ctx-2")
+
+    assert any("context length exceeded" in r.message for r in caplog.records)
+    assert any("anthropic/claude-sonnet-4-6" in r.message for r in caplog.records)
+
+
+def test_openai_truncation_warns_on_standard_logger(caplog):
+    """finish_reason == 'length' is warned via the standard logger."""
+    mock_response = MagicMock()
+    mock_response.choices[0].message.content = "{ incomplete"
+    mock_response.choices[0].finish_reason = "length"
+
+    with (
+        patch("openai.OpenAI") as mock_client_cls,
+        caplog.at_level("WARNING", logger="mykg.llm.retry"),
+    ):
+        mock_client = MagicMock()
+        mock_client_cls.return_value = mock_client
+        mock_client.chat.completions.create.return_value = mock_response
+
+        from mykg.llm.openai_adapter import OpenAIAdapter
+
+        adapter = OpenAIAdapter(model="gpt-4o", max_tokens=10, timeout=30, api_key="test-key")
+        adapter.complete("system prompt", "user prompt")
+
+    assert any("output truncated" in r.message for r in caplog.records)
+    assert any("openai/gpt-4o" in r.message for r in caplog.records)
+
+
+def test_openai_normal_completion_emits_no_warning(caplog):
+    mock_response = MagicMock()
+    mock_response.choices[0].message.content = "hello"
+    mock_response.choices[0].finish_reason = "stop"
+
+    with (
+        patch("openai.OpenAI") as mock_client_cls,
+        caplog.at_level("WARNING", logger="mykg.llm.retry"),
+    ):
+        mock_client = MagicMock()
+        mock_client_cls.return_value = mock_client
+        mock_client.chat.completions.create.return_value = mock_response
+
+        from mykg.llm.openai_adapter import OpenAIAdapter
+
+        adapter = OpenAIAdapter(model="gpt-4o", max_tokens=10, timeout=30, api_key="test-key")
+        adapter.complete("system prompt", "user prompt")
+
+    assert caplog.records == []
+
+
+def test_openai_context_overflow_warns_on_standard_logger(caplog):
+    """A context-length-exceeded BadRequestError is warned before re-raising."""
+    import openai
+
+    api_err = openai.BadRequestError(
+        message="This model's maximum context length is 128000 tokens",
+        response=MagicMock(status_code=400, headers={}),
+        body={
+            "error": {
+                "message": "This model's maximum context length is 128000 tokens",
+            }
+        },
+    )
+
+    with (
+        patch("openai.OpenAI") as mock_cls,
+        caplog.at_level("WARNING", logger="mykg.llm.retry"),
+    ):
+        mock_client = MagicMock()
+        mock_cls.return_value = mock_client
+        mock_client.chat.completions.create.side_effect = api_err
+
+        from mykg.llm.openai_adapter import OpenAIAdapter
+
+        adapter = OpenAIAdapter(model="gpt-4o", max_tokens=10, timeout=30, api_key="test-key")
+        with pytest.raises(openai.BadRequestError):
+            adapter.complete("sys", "user")
+
+    assert any("context length exceeded" in r.message for r in caplog.records)
+    assert any("openai/gpt-4o" in r.message for r in caplog.records)
+
+
+def test_openrouter_truncation_warns_on_standard_logger(caplog):
+    mock_response = MagicMock()
+    mock_response.choices[0].message.content = "{ incomplete"
+    mock_response.choices[0].finish_reason = "length"
+
+    with (
+        patch("openai.OpenAI") as mock_client_cls,
+        caplog.at_level("WARNING", logger="mykg.llm.retry"),
+    ):
+        mock_client = MagicMock()
+        mock_client_cls.return_value = mock_client
+        mock_client.chat.completions.create.return_value = mock_response
+
+        from mykg.llm.openrouter_adapter import OpenRouterAdapter
+
+        adapter = OpenRouterAdapter(model="m", max_tokens=10, timeout=10, api_key="test-key")
+        adapter.complete("s", "u")
+
+    assert any("output truncated" in r.message for r in caplog.records)
+    assert any("openrouter/m" in r.message for r in caplog.records)
+
+
+def test_openrouter_normal_completion_emits_no_warning(caplog):
+    mock_response = MagicMock()
+    mock_response.choices[0].message.content = "hello"
+    mock_response.choices[0].finish_reason = "stop"
+
+    with (
+        patch("openai.OpenAI") as mock_client_cls,
+        caplog.at_level("WARNING", logger="mykg.llm.retry"),
+    ):
+        mock_client = MagicMock()
+        mock_client_cls.return_value = mock_client
+        mock_client.chat.completions.create.return_value = mock_response
+
+        from mykg.llm.openrouter_adapter import OpenRouterAdapter
+
+        adapter = OpenRouterAdapter(model="m", max_tokens=10, timeout=10, api_key="test-key")
+        adapter.complete("s", "u")
+
+    assert caplog.records == []
+
+
+def test_openrouter_context_overflow_warns_on_standard_logger(caplog):
+    import openai
+
+    api_err = openai.APIStatusError(
+        message="maximum context length exceeded",
+        response=MagicMock(status_code=400, headers={}),
+        body={"error": {"message": "maximum context length exceeded"}},
+    )
+
+    with (
+        patch("openai.OpenAI") as mock_cls,
+        caplog.at_level("WARNING", logger="mykg.llm.retry"),
+    ):
+        mock_client = MagicMock()
+        mock_cls.return_value = mock_client
+        mock_client.chat.completions.create.side_effect = api_err
+
+        from mykg.llm.openrouter_adapter import OpenRouterAdapter
+
+        adapter = OpenRouterAdapter(
+            model="m", max_tokens=10, timeout=10, api_key="test-key", retry_429_max=0
+        )
+        with pytest.raises(openai.APIStatusError):
+            adapter.complete("s", "u")
+
+    assert any("context length exceeded" in r.message for r in caplog.records)
+    assert any("openrouter/m" in r.message for r in caplog.records)
+
+
+def test_ollama_truncation_warns_on_standard_logger(caplog):
+    mock_response = MagicMock()
+    mock_response.read.return_value = json.dumps(
+        {"response": "trunc", "done_reason": "length"}
+    ).encode()
+
+    with (
+        patch("urllib.request.urlopen") as mock_urlopen,
+        caplog.at_level("WARNING", logger="mykg.llm.retry"),
+    ):
+        mock_urlopen.return_value.__enter__.return_value = mock_response
+
+        from mykg.llm.ollama_adapter import OllamaAdapter
+
+        adapter = OllamaAdapter(
+            model="gemma4:31b",
+            base_url="http://localhost:11434",
+            timeout=120,
+            stream=False,
+            max_tokens=10,
+            context_window=64000,
+        )
+        adapter.complete("system prompt", "user prompt")
+
+    assert any("output truncated" in r.message for r in caplog.records)
+    assert any("ollama/gemma4:31b" in r.message for r in caplog.records)
+
+
+def test_ollama_normal_completion_emits_no_warning(caplog):
+    mock_response = MagicMock()
+    mock_response.read.return_value = json.dumps(
+        {"response": "hello", "done_reason": "stop"}
+    ).encode()
+
+    with (
+        patch("urllib.request.urlopen") as mock_urlopen,
+        caplog.at_level("WARNING", logger="mykg.llm.retry"),
+    ):
+        mock_urlopen.return_value.__enter__.return_value = mock_response
+
+        from mykg.llm.ollama_adapter import OllamaAdapter
+
+        adapter = OllamaAdapter(
+            model="gemma4:31b",
+            base_url="http://localhost:11434",
+            timeout=120,
+            stream=False,
+            max_tokens=10,
+            context_window=64000,
+        )
+        adapter.complete("system prompt", "user prompt")
+
+    assert caplog.records == []
+
+
+def test_ollama_context_overflow_http_error_warns_on_standard_logger(caplog):
+    exc = urllib.error.HTTPError(
+        url="http://localhost:11434/api/generate",
+        code=400,
+        msg="maximum context length exceeded",
+        hdrs=None,  # type: ignore[arg-type]
+        fp=io.BytesIO(b""),
+    )
+
+    with (
+        patch("urllib.request.urlopen", side_effect=exc),
+        caplog.at_level("WARNING", logger="mykg.llm.retry"),
+    ):
+        adapter = _ollama_adapter(retry_max=0)
+        with pytest.raises(RuntimeError, match="Ollama request failed"):
+            adapter.complete("sys", "user")
+
+    assert any("context length exceeded" in r.message for r in caplog.records)
+
+
+def test_ollama_context_overflow_url_error_warns_on_standard_logger(caplog):
+    exc = urllib.error.URLError("maximum context length exceeded")
+
+    with (
+        patch("urllib.request.urlopen", side_effect=exc),
+        caplog.at_level("WARNING", logger="mykg.llm.retry"),
+    ):
+        adapter = _ollama_adapter(retry_max=0)
+        with pytest.raises(RuntimeError, match="Ollama request failed"):
+            adapter.complete("sys", "user")
+
+    assert any("context length exceeded" in r.message for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# AnthropicAdapter — prompt caching
+# ---------------------------------------------------------------------------
+
+
+class _Usage:
+    """Minimal usage object with only the attributes the response carries.
+
+    Using a plain class (not MagicMock) lets a test omit the cache attributes
+    entirely so the adapter's getattr(..., 0) default path is exercised.
+    """
+
+    def __init__(self, input_tokens=10, output_tokens=5, **extra):
+        self.input_tokens = input_tokens
+        self.output_tokens = output_tokens
+        for k, v in extra.items():
+            setattr(self, k, v)
+
+
+def _anthropic_response(text="{}", usage=None):
+    block = MagicMock()
+    block.text = text
+    resp = MagicMock()
+    resp.content = [block]
+    resp.stop_reason = "end_turn"
+    resp.usage = usage if usage is not None else _Usage()
+    return resp
+
+
+def test_anthropic_adapter_sends_cache_control():
+    """complete() passes top-level cache_control={'type': 'ephemeral'} to messages.create."""
+    with (
+        patch("anthropic.Anthropic") as mock_cls,
+        patch("mykg.llm.anthropic_adapter.record_llm_call"),
+    ):
+        mock_client = MagicMock()
+        mock_cls.return_value = mock_client
+        mock_client.messages.create.return_value = _anthropic_response()
+
+        from mykg.llm.anthropic_adapter import AnthropicAdapter
+
+        adapter = AnthropicAdapter(
+            model="claude-sonnet-4-6", max_tokens=10, timeout=10, api_key="test-key"
+        )
+        adapter.complete("system prompt", "user prompt")
+
+    kwargs = mock_client.messages.create.call_args.kwargs
+    assert kwargs.get("cache_control") == {"type": "ephemeral"}
+    # system stays a plain string — top-level cache_control auto-caches it.
+    assert kwargs.get("system") == "system prompt"
+
+
+def test_anthropic_adapter_reports_cache_usage():
+    """Cache read/creation token counts from usage reach record_llm_call."""
+    usage = _Usage(
+        input_tokens=42,
+        output_tokens=7,
+        cache_read_input_tokens=1234,
+        cache_creation_input_tokens=56,
+    )
+
+    with (
+        patch("anthropic.Anthropic") as mock_cls,
+        patch("mykg.llm.anthropic_adapter.record_llm_call") as mock_record,
+    ):
+        mock_client = MagicMock()
+        mock_cls.return_value = mock_client
+        mock_client.messages.create.return_value = _anthropic_response(usage=usage)
+
+        from mykg.llm.anthropic_adapter import AnthropicAdapter
+
+        adapter = AnthropicAdapter(
+            model="claude-sonnet-4-6", max_tokens=10, timeout=10, api_key="test-key"
+        )
+        adapter.complete("sys", "user")
+
+    kwargs = mock_record.call_args.kwargs
+    assert kwargs.get("cache_read_tokens") == 1234
+    assert kwargs.get("cache_creation_tokens") == 56
+
+
+def test_anthropic_adapter_cache_usage_defaults_to_zero():
+    """When usage lacks the cache attributes, record_llm_call gets 0 (no crash)."""
+    # _Usage() built without the cache attrs — the getattr default path.
+    with (
+        patch("anthropic.Anthropic") as mock_cls,
+        patch("mykg.llm.anthropic_adapter.record_llm_call") as mock_record,
+    ):
+        mock_client = MagicMock()
+        mock_cls.return_value = mock_client
+        mock_client.messages.create.return_value = _anthropic_response(usage=_Usage())
+
+        from mykg.llm.anthropic_adapter import AnthropicAdapter
+
+        adapter = AnthropicAdapter(
+            model="claude-sonnet-4-6", max_tokens=10, timeout=10, api_key="test-key"
+        )
+        adapter.complete("sys", "user")
+
+    kwargs = mock_record.call_args.kwargs
+    assert kwargs.get("cache_read_tokens") == 0
+    assert kwargs.get("cache_creation_tokens") == 0
+
+
+def test_anthropic_adapter_missing_usage_defaults_all_to_zero():
+    """A response with usage=None does not raise; all four counts default to 0."""
+    resp = _anthropic_response()
+    resp.usage = None  # SDK omitted usage entirely
+
+    with (
+        patch("anthropic.Anthropic") as mock_cls,
+        patch("mykg.llm.anthropic_adapter.record_llm_call") as mock_record,
+    ):
+        mock_client = MagicMock()
+        mock_cls.return_value = mock_client
+        mock_client.messages.create.return_value = resp
+
+        from mykg.llm.anthropic_adapter import AnthropicAdapter
+
+        adapter = AnthropicAdapter(
+            model="claude-sonnet-4-6", max_tokens=10, timeout=10, api_key="test-key"
+        )
+        # Must not raise AttributeError even though usage is None.
+        adapter.complete("sys", "user")
+
+    kwargs = mock_record.call_args.kwargs
+    assert kwargs.get("input_tokens") == 0
+    assert kwargs.get("output_tokens") == 0
+    assert kwargs.get("cache_read_tokens") == 0
+    assert kwargs.get("cache_creation_tokens") == 0

@@ -672,8 +672,10 @@ def _nx_flatten_attributes(attrs: dict) -> dict:
         val = payload.get("value") or ""
         if isinstance(val, list):
             val = "|".join(str(v) for v in val)
-        flat[f"attr_{name}_value"] = val
-        flat[f"attr_{name}_confidence"] = float(payload.get("confidence", 0.0))
+        # GML requires ^[A-Za-z][0-9A-Za-z_]*$ — sanitize any invalid characters.
+        safe_name = re.sub(r"[^a-zA-Z0-9_]", "_", name)
+        flat[f"attr_{safe_name}_value"] = val
+        flat[f"attr_{safe_name}_confidence"] = float(payload.get("confidence", 0.0))
     return flat
 
 
@@ -718,39 +720,63 @@ def export_networkx(nodes: list[dict], edge_metadata: dict, output_dir: Path) ->
     G = _build_nx_graph(nodes, edge_metadata)
     written = []
 
-    nx.write_gml(G, str(nx_dir / "knowledge_graph.gml"))
-    written.append("knowledge_graph.gml")
+    try:
+        nx.write_gml(G, str(nx_dir / "knowledge_graph.gml"))
+        written.append("knowledge_graph.gml")
+    except Exception as e:
+        warnings.warn(f"NetworkX GML export failed: {e}", stacklevel=2)
 
-    nx.write_graphml(G, str(nx_dir / "knowledge_graph.graphml"))
-    written.append("knowledge_graph.graphml")
+    try:
+        nx.write_graphml(G, str(nx_dir / "knowledge_graph.graphml"))
+        written.append("knowledge_graph.graphml")
+    except Exception as e:
+        warnings.warn(f"NetworkX GraphML export failed: {e}", stacklevel=2)
 
-    nx.write_gexf(G, str(nx_dir / "knowledge_graph.gexf"))
-    written.append("knowledge_graph.gexf")
+    try:
+        nx.write_gexf(G, str(nx_dir / "knowledge_graph.gexf"))
+        written.append("knowledge_graph.gexf")
+    except Exception as e:
+        warnings.warn(f"NetworkX GEXF export failed: {e}", stacklevel=2)
 
     # Pajek format drops non-string and empty attributes by design — silence the
     # per-attribute UserWarnings that networkx.readwrite.pajek emits for each one.
-    with warnings.catch_warnings():
-        warnings.filterwarnings(
-            "ignore",
-            message=r"(Node|Edge) attribute .* is not processed\..*",
-            category=UserWarning,
-            module=r"networkx\.readwrite\.pajek",
-        )
-        nx.write_pajek(G, str(nx_dir / "knowledge_graph.net"))
-    written.append("knowledge_graph.net")
+    try:
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message=r"(Node|Edge) attribute .* is not processed\..*",
+                category=UserWarning,
+                module=r"networkx\.readwrite\.pajek",
+            )
+            nx.write_pajek(G, str(nx_dir / "knowledge_graph.net"))
+        written.append("knowledge_graph.net")
+    except Exception as e:
+        warnings.warn(f"NetworkX Pajek export failed: {e}", stacklevel=2)
 
-    with open(nx_dir / "knowledge_graph.json", "w") as f:
-        json.dump(json_graph.node_link_data(G), f, indent=_cfg.JSON_INDENT)
-    written.append("knowledge_graph.json")
+    try:
+        with open(nx_dir / "knowledge_graph.json", "w", encoding="utf-8") as f:
+            json.dump(json_graph.node_link_data(G), f, indent=_cfg.JSON_INDENT)
+        written.append("knowledge_graph.json")
+    except Exception as e:
+        warnings.warn(f"NetworkX JSON export failed: {e}", stacklevel=2)
 
-    export_html(G, nx_dir)
-    written.append("knowledge_graph.html")
+    try:
+        export_html(G, nx_dir)
+        written.append("knowledge_graph.html")
+    except Exception as e:
+        warnings.warn(f"NetworkX HTML export failed: {e}", stacklevel=2)
 
-    nx.write_edgelist(G, str(nx_dir / "edges_nx.txt"), data=True)
-    written.append("edges_nx.txt")
+    try:
+        nx.write_edgelist(G, str(nx_dir / "edges_nx.txt"), data=True)
+        written.append("edges_nx.txt")
+    except Exception as e:
+        warnings.warn(f"NetworkX edge list export failed: {e}", stacklevel=2)
 
-    nx.write_adjlist(G, str(nx_dir / "adjacency.txt"))
-    written.append("adjacency.txt")
+    try:
+        nx.write_adjlist(G, str(nx_dir / "adjacency.txt"))
+        written.append("adjacency.txt")
+    except Exception as e:
+        warnings.warn(f"NetworkX adjacency list export failed: {e}", stacklevel=2)
 
     return written
 
@@ -871,11 +897,15 @@ def _obsidian_index(nodes: list[dict], edge_count: int) -> str:
 
 
 def _vault_report_path(path: Path, output_dir: Path) -> str:
-    """Path relative to output_dir when inside it, absolute otherwise."""
+    """Path relative to output_dir when inside it, absolute otherwise.
+
+    Always uses forward slashes so the returned report paths are stable across
+    platforms (matches the export_networkx contract).
+    """
     try:
-        return str(path.relative_to(output_dir))
+        return path.relative_to(output_dir).as_posix()
     except ValueError:
-        return str(path)
+        return path.as_posix()
 
 
 def export_obsidian(

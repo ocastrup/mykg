@@ -5,7 +5,7 @@ context_calculator.py — suggest mykg mykg_config.yaml token-budget parameters.
 Two modes:
 
   1. Manual mode — supply model parameters on the command line:
-       python context_calculator.py --context 32000 --max-output 16384
+       python context_calculator.py --context 64000 --max-output 32000
 
   2. Auto mode — read the active profile from mykg_config.yaml and measure
      the actual input corpus to suggest an optimal chunk divisor:
@@ -25,7 +25,9 @@ In auto mode the script:
   - Prints a ready-to-paste YAML snippet for the active profile and writes a
     mykg_config_candidate.yaml that patches: llm.context_window, llm.max_output_tokens,
     chunking.window_tokens, chunking.overlap_tokens, pass1.batch_token_target,
-    pass2.batch_token_target, pass2.concat_batch_token_target, and feedback.max_file_chars
+    pass2.batch_token_target, pass2.concat_batch_token_target, feedback.max_file_chars,
+    normalize_names.batch_token_target, and pass1.max_schema_proposals (shown as a
+    fixed reminder; not derived from context window)
 """
 
 import argparse
@@ -66,7 +68,7 @@ def load_mykg_config() -> tuple[dict, Path]:
     for directory in [here, *here.parents]:
         config_path = directory / "mykg_config.yaml"
         if config_path.exists():
-            with open(config_path) as f:
+            with open(config_path, encoding="utf-8") as f:
                 raw = yaml.safe_load(f)
             profile_name = raw.get("profile")
             if profile_name:
@@ -205,7 +207,7 @@ def write_candidate_config(config_path: "Path", profile_name: str, result: dict)
     """
     import re
 
-    text = config_path.read_text()
+    text = config_path.read_text(encoding="utf-8")
     lines = text.splitlines(keepends=True)
 
     # `batch_token_target` appears under both pass1 and pass2 with the same
@@ -250,7 +252,7 @@ def write_candidate_config(config_path: "Path", profile_name: str, result: dict)
     stem = config_path.stem  # "mykg_config"
     suffix = config_path.suffix  # ".yaml"
     out_path = config_path.with_name(f"{stem}_candidate{suffix}")
-    out_path.write_text("".join(new_lines))
+    out_path.write_text("".join(new_lines), encoding="utf-8")
     return out_path
 
 
@@ -340,6 +342,7 @@ def print_report(
     print(f"        overlap_tokens: {ot}  # = window_tokens × {OVERLAP_RATIO:.0%}")
     print("      pass1:")
     print(f"        batch_token_target: {btt}  # = input_headroom × {1 - SAFETY_MARGIN_RATIO:.0%}")
+    print("        max_schema_proposals: 50  # fixed cap; lower on small-context models")
     print("      pass2:")
     print(f"        batch_token_target: {btt}        # used when prep_mode=batch_chunks")
     print(f"        concat_batch_token_target: {btt}  # used when prep_mode=concat")
@@ -347,6 +350,8 @@ def print_report(
     print(
         f"        max_file_chars: {mfc}  # = safety margin remainder × {CHARS_PER_TOKEN} chars/token ({ftr:,} tokens)"
     )
+    print("      normalize_names:")
+    print(f"        batch_token_target: {btt}  # matches concat_batch_token_target")
     print()
 
 
@@ -366,8 +371,8 @@ Examples:
   python context_calculator.py --from-config --input-dir ./input_files/my_corpus
 
   # Manual mode — supply all parameters explicitly:
-  python context_calculator.py --model openrouter-free --context 32000 --max-output 16384
-  python context_calculator.py --model claude-cli      --context 200000 --max-output 64000
+  python context_calculator.py --model openrouter-free --context 64000 --max-output 32000
+  python context_calculator.py --model claude-cli      --context 200000 --max-output 32000
   python context_calculator.py --context 128000 --input-headroom 96000 --chunk-divisor 8
         """,
     )

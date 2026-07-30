@@ -11,9 +11,25 @@ when it constructs LLM adapters.
 
 from __future__ import annotations
 
+import importlib
+import os
+import sys
 from pathlib import Path
 
 import yaml
+
+# ---------------------------------------------------------------------------
+# Run-only profile/model overrides (set by the CLI --profile / --model flags).
+#
+# These live in os.environ rather than module globals because activate_profile()
+# re-resolves the whole module via importlib.reload(), which re-executes the
+# module body and would reset any plain module global back to its default. The
+# environment survives the reload, so _apply_profile() can read the override on
+# the reloaded copy. They are never written to mykg_config.yaml — the on-disk
+# config is untouched.
+# ---------------------------------------------------------------------------
+_PROFILE_OVERRIDE_ENV = "MYKG_PROFILE_OVERRIDE"
+_MODEL_OVERRIDE_ENV = "MYKG_MODEL_OVERRIDE"
 
 # ---------------------------------------------------------------------------
 # Locate and load mykg_config.yaml
@@ -34,7 +50,7 @@ def _find_config() -> Path:
 
 def _load() -> dict:
     path = _find_config()
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         return yaml.safe_load(f)
 
 
@@ -45,7 +61,8 @@ def _apply_profile(raw: dict) -> dict:
     `pipeline` block. The active profile replaces the top-level values entirely;
     there is no merging with a base pipeline section.
     """
-    profile_name = raw.get("profile")
+    # A run-only --profile override (set by the CLI) wins over the YAML profile:.
+    profile_name = os.environ.get(_PROFILE_OVERRIDE_ENV) or raw.get("profile")
     if not profile_name:
         return raw
     profiles = raw.get("profiles", {})
@@ -68,7 +85,54 @@ def _apply_profile(raw: dict) -> dict:
         result["llm_retry"] = profile["llm_retry"]
     if "agent" in profile:
         result["agent"] = profile["agent"]
+    if "mcp" in profile:
+        result["mcp"] = profile["mcp"]
+
+    # A run-only --model override replaces just the model inside the resolved llm block.
+    model_override = os.environ.get(_MODEL_OVERRIDE_ENV)
+    if model_override and "llm" in result:
+        result["llm"] = {**result["llm"], "model": model_override}
+
     return result
+
+
+def activate_profile(profile_name: str, model: str | None = None) -> None:
+    """Re-resolve every config constant against ``profile_name`` for this run only.
+
+    This is the backing implementation of ``extract-graph --profile/--model``. It
+    records the override in the environment, then reloads this module so the whole
+    flat block of constants (RAW, PASS2_MAX_WORKERS, chunking, timeouts, …) is
+    rebuilt from the selected profile — exactly as if ``profile: <name>`` were set
+    in mykg_config.yaml. It never writes to disk.
+
+    Process-global and single-threaded by design: it mutates ``os.environ`` and
+    reloads this module, so it must not be called concurrently from multiple
+    threads with different profiles (they would race on the env vars and the
+    reload, yielding constants mixed across profiles). It is intended for the
+    one-shot CLI flow, where a single call precedes all config reads.
+
+    Raises ``ValueError`` if the profile is not declared in ``profiles:``.
+    """
+    profiles = _load().get("profiles", {})
+    if profile_name not in profiles:
+        raise ValueError(
+            f"Profile '{profile_name}' not found in mykg_config.yaml. "
+            f"Available profiles: {list(profiles.keys())}"
+        )
+    os.environ[_PROFILE_OVERRIDE_ENV] = profile_name
+    if model:
+        os.environ[_MODEL_OVERRIDE_ENV] = model
+    else:
+        os.environ.pop(_MODEL_OVERRIDE_ENV, None)
+    try:
+        importlib.reload(sys.modules[__name__])
+    finally:
+        # The reloaded module has already baked the override into its constants,
+        # so the env vars have done their job. Clear them so an unrelated later
+        # reload (e.g. an embedded second run in the same process) falls back to
+        # the YAML-default profile instead of silently re-applying this override.
+        os.environ.pop(_PROFILE_OVERRIDE_ENV, None)
+        os.environ.pop(_MODEL_OVERRIDE_ENV, None)
 
 
 CONFIG_PATH: Path = _find_config()
@@ -98,13 +162,15 @@ CHUNK_TIKTOKEN_ENCODING: str = _get("chunking", "tiktoken_encoding")
 PASS1_BATCH_TOKEN_TARGET: int = _get("pass1", "batch_token_target")
 PASS1_MAX_WORKERS: int = _get("pass1", "max_workers")
 PASS1_PER_FILE_BATCHING: bool = _get_opt("pass1", "per_file_batching", False)
+PASS1_MAX_SCHEMA_PROPOSALS: int = _get_opt("pass1", "max_schema_proposals", 50)
+PASS1_RANDOM_SEED: int = _get_opt("pass1", "random_seed", 0)
 
 # ---------------------------------------------------------------------------
 # Pass 2
 # ---------------------------------------------------------------------------
 PASS2_MAX_WORKERS: int = _get("pass2", "max_workers")
 PASS2_STATEFUL_CHUNKS: bool = _get("pass2", "stateful_chunks")
-PASS2_PREP_MODE: str = _get_opt("pass2", "prep_mode", "per_file")
+PASS2_PREP_MODE: str = _get_opt("pass2", "prep_mode", "batch_chunks")
 PASS2_CONCAT_BATCH_TOKEN_TARGET: int = _get_opt("pass2", "concat_batch_token_target", 100000)
 PASS2_BATCH_TOKEN_TARGET: int = _get_opt("pass2", "batch_token_target", 100000)
 PASS2_BATCH_PER_FILE: bool = _get_opt("pass2", "batch_per_file", False)
@@ -183,6 +249,7 @@ WATCH_ENTRIES: list = list(_watch.get("entries", []) or [])
 # ---------------------------------------------------------------------------
 NORMALIZE_NAMES_ENABLED: bool = _get("normalize_names", "enabled")
 NORMALIZE_NAMES_MAX_PER_TYPE: int = _get("normalize_names", "max_names_per_type")
+NORMALIZE_NAMES_BATCH_TOKEN_TARGET: int = _get_opt("normalize_names", "batch_token_target", 60000)
 
 # ---------------------------------------------------------------------------
 # Orphan-connection pass (two-stage: co-occurrence heuristic + LLM confirmation)
@@ -254,9 +321,37 @@ PREPROCESS_EXTENSIONS: frozenset[str] = frozenset(
     for ext in _get_opt(
         "preprocess",
         "extensions",
-        [".pdf", ".docx", ".doc", ".pptx", ".png", ".jpg", ".jpeg", ".html", ".htm"],
+        [".pdf", ".docx", ".doc", ".pptx", ".png", ".jpg", ".jpeg", ".html", ".htm", ".txt"],
     )
 )
+
+# ---------------------------------------------------------------------------
+# Fetch-web — standalone website crawler (Crawlee in an ephemeral uv venv).
+# Mirrors the preprocess MinerU venv pattern (D48): nothing about Crawlee is
+# installed into mykg's own interpreter. The crawler writes raw HTML + a
+# fetch_manifest.json into a folder that `extract-graph` then consumes.
+# The asset allowlist reuses PREPROCESS_EXTENSIONS — no separate fetch list.
+# ---------------------------------------------------------------------------
+FETCH_ENABLED: bool = bool(_get_opt("fetch", "enabled", True))
+FETCH_OUTPUT_DIR: str = _get_opt("fetch", "output_dir", "mykg_web_fetch")
+FETCH_STRATEGY: str = _get_opt("fetch", "strategy", "same-domain")
+FETCH_MAX_PAGES: int = int(_get_opt("fetch", "max_pages", 500))
+FETCH_MAX_DEPTH: int = int(_get_opt("fetch", "max_depth", 10))
+FETCH_RESPECT_ROBOTS: bool = bool(_get_opt("fetch", "respect_robots", True))
+FETCH_REQUEST_DELAY_SECONDS: float = float(_get_opt("fetch", "request_delay_seconds", 0.5))
+FETCH_CONCURRENCY: int = int(_get_opt("fetch", "concurrency", 4))
+FETCH_DOWNLOAD_ASSETS: bool = bool(_get_opt("fetch", "download_assets", True))
+FETCH_TIMEOUT_SECONDS: int = int(_get_opt("fetch", "timeout_seconds", 1800))
+FETCH_UV_PATH: str = _get_opt("fetch", "uv_path", "uv")
+FETCH_UV_PYTHON_VERSION: str = _get_opt("fetch", "uv_python_version", "3.12")
+FETCH_CRAWLEE_SPEC: str = _get_opt("fetch", "crawlee_spec", "crawlee[beautifulsoup]")
+FETCH_INSTALL_TIMEOUT_SECONDS: int = int(_get_opt("fetch", "install_timeout_seconds", 1800))
+FETCH_GITHUB_CLONE_ENABLED: bool = bool(_get_opt("fetch", "github_clone_enabled", True))
+FETCH_GITHUB_CLONE_DEPTH: int = int(_get_opt("fetch", "github_clone_depth", 1))
+FETCH_GITHUB_CLONE_TIMEOUT_SECONDS: int = int(
+    _get_opt("fetch", "github_clone_timeout_seconds", 1800)
+)
+FETCH_MAX_WORKERS: int = int(_get_opt("fetch", "max_workers", 2))
 
 # ---------------------------------------------------------------------------
 # JSON pretty-print (all intermediate files)
@@ -293,6 +388,16 @@ MERGE_SURGICAL_TOP_K_CHUNKS_PER_PROPERTY: int = _get_opt(
 MERGE_ORPHAN_SCHEMA_MAX_RESTARTS: int = _get_opt("merge_graphs", "orphan_pass_max_restarts", 1)
 
 # ---------------------------------------------------------------------------
+# Append — incremental schema growth (--append-with-grow-schema, D52)
+# ---------------------------------------------------------------------------
+# Cap on how many old chunks are surgically re-extracted per newly added
+# concept/property when the locked Pass 1 grows the schema. 0 = disable
+# back-fill entirely. Mirrors merge_graphs.surgical_top_k_chunks_per_property.
+APPEND_GROW_SCHEMA_BACKFILL_TOP_K_CHUNKS_PER_TYPE: int = _get_opt(
+    "append", "grow_schema_backfill_top_k_chunks_per_type", 10
+)
+
+# ---------------------------------------------------------------------------
 # Agent provider (D49) — inbox/outbox filesystem contract with host skill
 # ---------------------------------------------------------------------------
 # These are only consumed when the active profile sets `provider: agent`.
@@ -302,3 +407,12 @@ _agent = RAW.get("agent") or {}
 AGENT_INBOX_DIR: str = _agent.get("inbox_dir", "agent_inbox")
 AGENT_OUTBOX_DIR: str = _agent.get("outbox_dir", "agent_outbox")
 AGENT_POLL_INTERVAL_SECONDS: float = float(_agent.get("poll_interval_seconds", 2))
+
+# ---------------------------------------------------------------------------
+# MCP server — `mykg mcp-serve` settings (top-level, not profile-scoped)
+# ---------------------------------------------------------------------------
+_mcp = RAW.get("mcp") or {}
+MCP_ENABLED: bool = bool(_mcp.get("enabled", False))
+MCP_HOST: str = _mcp.get("host", "localhost")
+MCP_PORT: int = int(_mcp.get("port", 3100))
+MCP_TRANSPORT: str = _mcp.get("transport", "stdio")

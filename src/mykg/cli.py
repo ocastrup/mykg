@@ -12,6 +12,8 @@ from pathlib import Path
 import click
 from dotenv import load_dotenv
 
+from mykg.uv_venv import ephemeral_venv
+
 
 def _cfg():
     from mykg import config
@@ -81,21 +83,21 @@ def _copy_input_files(input_dir: Path, session_root: Path, copy_config: bool = T
 
 _PROFILE_META = {
     "openrouter-free": {
-        "label": "OpenRouter (default — many free models, one API key)",
+        "label": "OpenRouter",
         "key_var": "OPENROUTER_API_KEY",
         "key_hint": "sk-or-...",
         "key_url": "https://openrouter.ai/keys",
         "default_model": "openrouter/free",
     },
     "anthropic-claude": {
-        "label": "Anthropic Claude (highest quality)",
+        "label": "Anthropic Claude",
         "key_var": "ANTHROPIC_API_KEY",
         "key_hint": "sk-ant-...",
-        "key_url": "https://console.anthropic.com/account/keys",
+        "key_url": "https://platform.claude.com/settings/keys",
         "default_model": "claude-sonnet-4-5",
     },
     "openai": {
-        "label": "OpenAI (GPT-4o and friends)",
+        "label": "OpenAI",
         "key_var": "OPENAI_API_KEY",
         "key_hint": "sk-...",
         "key_url": "https://platform.openai.com/api-keys",
@@ -106,7 +108,7 @@ _PROFILE_META = {
         "key_var": None,
         "key_hint": None,
         "key_url": None,
-        "default_model": "llama3.3",
+        "default_model": "gemma4:e4b",
     },
     "claude-cli": {
         "label": "Claude CLI (uses claude -p)",
@@ -173,7 +175,7 @@ def init_config(
         # `pip install -U mykg`.
         if reinstall_skill or reinstall_claude_md:
             try:
-                existing = dest.read_text()
+                existing = dest.read_text(encoding="utf-8")
             except OSError:
                 existing = ""
             if "profile: agent-claude-code" in existing:
@@ -218,22 +220,27 @@ def init_config(
     # --- Model selection -----------------------------------------------------
     if model is None and meta["default_model"] is not None:
         default_model = meta["default_model"]
-        model_input = click.prompt(
+        # click.prompt returns default_model verbatim on a bare Enter, so
+        # model_input is never empty here — always honour whatever it holds
+        # (including a retyped default) rather than comparing against
+        # default_model, which previously made an explicit retype of the
+        # default silently no-op (indistinguishable from pressing Enter).
+        model = click.prompt(
             "Model name (press Enter for default)",
             default=default_model,
             show_default=True,
-        ).strip()
-        model = model_input if model_input != default_model else None
+            value_proc=_validate_model_name,
+        )
 
     # --- Write mykg_config.yaml with selected profile and optional model -
     import re
 
     template = Path(__file__).parent / "data" / "mykg_config.yaml"
-    content = template.read_text()
+    content = template.read_text(encoding="utf-8")
     content = re.sub(r"^profile:.*$", f"profile: {profile}", content, count=1, flags=re.MULTILINE)
     if model:
         content = _patch_profile_model(content, profile, model)
-    dest.write_text(content)
+    dest.write_text(content, encoding="utf-8")
     model_note = f", model: {model}" if model else ""
     click.echo(f"\nCreated mykg_config.yaml in {Path.cwd()} (profile: {profile}{model_note})")
 
@@ -254,7 +261,7 @@ def init_config(
     # Check if key is already set
     existing_key = None
     if env_file.exists():
-        for line in env_file.read_text().splitlines():
+        for line in env_file.read_text(encoding="utf-8").splitlines():
             if line.startswith(f"{var}=") and line[len(var) + 1 :].strip():
                 existing_key = line[len(var) + 1 :].strip()
                 break
@@ -286,6 +293,24 @@ def init_config(
     )
 
 
+def _validate_model_name(raw: str) -> str:
+    """Basic sanity check for an interactively-entered model name.
+
+    Deliberately permissive — model slugs vary wildly across providers
+    (``openrouter/free``, ``gemma4:e4b``, ``claude-sonnet-4-5``,
+    ``gpt-4o``) so this only rejects input that can never be a valid
+    model name: blank/whitespace-only, or containing embedded whitespace
+    (a sign of a pasted sentence rather than a slug). ``click.prompt``
+    re-prompts automatically when this raises ``click.UsageError``.
+    """
+    value = raw.strip()
+    if not value:
+        raise click.UsageError("Model name cannot be blank.")
+    if any(ch.isspace() for ch in value):
+        raise click.UsageError("Model name cannot contain spaces.")
+    return value
+
+
 def _patch_profile_model(content: str, profile: str, model: str) -> str:
     """Replace the model: line inside a specific profile block in the YAML text."""
     import re
@@ -302,7 +327,7 @@ def _patch_profile_model(content: str, profile: str, model: str) -> str:
 
 def _write_env_key(env_file: Path, var: str, value: str) -> None:
     """Write or update a single key in .env.mykg, preserving other lines."""
-    lines = env_file.read_text().splitlines() if env_file.exists() else []
+    lines = env_file.read_text(encoding="utf-8").splitlines() if env_file.exists() else []
     updated = False
     for i, line in enumerate(lines):
         if line.startswith(f"{var}="):
@@ -311,7 +336,7 @@ def _write_env_key(env_file: Path, var: str, value: str) -> None:
             break
     if not updated:
         lines.append(f"{var}={value}")
-    env_file.write_text("\n".join(lines) + "\n")
+    env_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 _SKILL_VERSION_STAMP = ".mykg_skill_version"
@@ -321,7 +346,7 @@ def _claude_skills_dir() -> Path:
     """Return the user-level Claude Code skills folder.
 
     Resolution order:
-      1. ``$CLAUDE_CONFIG_DIR/skills`` — explicit override (graphify-style).
+      1. ``$CLAUDE_CONFIG_DIR/skills`` — explicit override.
       2. ``~/.claude/skills`` — macOS / Linux / Windows-Desktop default.
       3. ``%APPDATA%/Claude/skills`` — Windows fallback if it already exists
          on disk and ``~/.claude/skills`` does not (some Windows Claude Code
@@ -359,7 +384,7 @@ def _manual_copy_hint(source: Path, target: Path) -> str:
 def _install_agent_skill(*, force: bool = False) -> None:
     """Copy the bundled mykg skill into ~/.claude/skills/mykg.
 
-    Uses graphify v8's atomic install pattern: copy to ``<target>.tmp``, then
+    Uses an atomic install pattern: copy to ``<target>.tmp``, then
     ``os.replace`` over the final destination. A ``.mykg_skill_version`` stamp
     file is written next to the skill so a future ``mykg init`` invocation can
     detect a stale install (package upgraded but skill not refreshed).
@@ -400,7 +425,7 @@ def _install_agent_skill(*, force: bool = False) -> None:
                 return
         elif stamp.is_file():
             try:
-                installed_version = stamp.read_text().strip()
+                installed_version = stamp.read_text(encoding="utf-8").strip()
             except OSError:
                 installed_version = "(unreadable)"
             if installed_version == mykg.__version__ and not force:
@@ -449,7 +474,7 @@ def _install_agent_skill(*, force: bool = False) -> None:
         return
 
     try:
-        (target / _SKILL_VERSION_STAMP).write_text(mykg.__version__)
+        (target / _SKILL_VERSION_STAMP).write_text(mykg.__version__, encoding="utf-8")
     except OSError as exc:
         click.echo(f"[skill] Warning: could not write version stamp: {exc}")
 
@@ -532,13 +557,12 @@ def _print_next_steps(
         )
     elif profile == "agent-claude-code":
         _install_agent_skill(force=reinstall_skill)
-        claude_status = _write_claude_md_snippet(
-            Path.cwd(), refresh=force or reinstall_claude_md
-        )
+        claude_status = _write_claude_md_snippet(Path.cwd(), refresh=force or reinstall_claude_md)
         click.echo(f"[claude.md] {claude_status}")
         click.echo("\nThen, in Claude Code:")
         click.echo("  1. Restart the app so the skill loader picks up the new entry.")
         click.echo("  2. Type:  /mykg <your_notes_directory>")
+
         click.echo("\nUpgrade later with:  mykg init --reinstall-skill --reinstall-claude-md")
         click.echo("See docs/agent-mode.md for the full inbox/outbox contract.")
 
@@ -565,6 +589,11 @@ def _print_next_steps(
 )
 @click.option("--verbose", "-v", is_flag=True, help="Enable DEBUG-level logging")
 @click.option("--base-schema", default=None, type=click.Path(exists=True), help="Locked TBox TTL")
+@click.option(
+    "--freeze-schema",
+    is_flag=True,
+    help="Use --base-schema verbatim: skip Pass 1 LLM induction entirely",
+)
 @click.option("--thesaurus", default=None, type=click.Path(exists=True), help="SKOS TTL thesaurus")
 @click.option("--review", is_flag=True, help="Pause for human schema review after Pass 1")
 @click.option(
@@ -572,26 +601,66 @@ def _print_next_steps(
     default=None,
     help="Force re-run from this step. Use 'orphan_connect_fullsweep' for a full clean "
     "sweep (deletes prior orphan_connections.json) or 'orphan_connect_incremental' "
-    "to preserve it and only re-send unresolved groups to the LLM.",
+    "to preserve it and only re-send unresolved groups to the LLM. Use "
+    "'merge_proposals' to skip Pass 1 LLM batch dispatch entirely and re-run only "
+    "merge/harmonize/quality-review from existing intermediate/pass1_batch_proposals/ "
+    "shards (plain 'pass1' wipes those shards for a full re-dispatch instead).",
+)
+@click.option(
+    "--profile",
+    default=None,
+    help="LLM profile from mykg_config.yaml to use for THIS run only "
+    "(the config file is not modified). Re-resolves all profile params "
+    "— provider, model, workers, timeouts — from the selected profile.",
+)
+@click.option(
+    "--model",
+    default=None,
+    help="Model name to use for this run only. Requires --profile.",
 )
 @click.option(
     "--workers",
-    default=lambda: _cfg().PASS2_MAX_WORKERS,
+    default=None,
     type=int,
-    show_default=True,
-    help="Number of parallel workers for Pass 2",
+    help="Number of parallel workers for Pass 2 "
+    "(default: pass2.max_workers from the active/selected profile)",
 )
 @click.option(
     "--confidence-agg",
-    default=lambda: _cfg().ASSEMBLY_CONFIDENCE_AGG,
+    default=None,
     type=click.Choice(["mean", "max"]),
-    show_default=True,
-    help="How to aggregate confidence scores when deduplicating",
+    help="How to aggregate confidence scores when deduplicating "
+    "(default: assembly.confidence_agg from the active/selected profile)",
 )
 @click.option(
     "--append",
     is_flag=True,
     help="Skip Pass 1, re-run only on new/modified files, then re-assemble and re-export",
+)
+@click.option(
+    "--append-with-grow-schema",
+    "grow_schema",
+    is_flag=True,
+    help="Implies --append AND runs Pass 1 in LOCKED mode over changed files so the LLM "
+    "may ADD new concepts/properties to the existing schema, then surgically back-fill "
+    "old files when the schema grows. The session schema.ttl is auto-loaded as the "
+    "locked base, so --base-schema must not be passed.",
+)
+@click.option(
+    "--pass1-schema-induction-only",
+    "pass1_only",
+    is_flag=True,
+    help="Run preprocess, ingest, Pass 1 schema induction, and schema_flatten "
+    "(every step before Pass 2), then stop. Produces a validated "
+    "schema.json/schema.ttl without running Pass 2 or anything downstream.",
+)
+@click.option(
+    "--pass2-kg-extraction-only",
+    "pass2_only",
+    is_flag=True,
+    help="Skip Pass 1 schema induction (requires an existing schema.json in "
+    "the target session) and run Pass 2 through validate_graph over the "
+    "full corpus. Unlike --append, not restricted to new/modified files.",
 )
 @click.option(
     "--session",
@@ -617,12 +686,18 @@ def extract_graph(
     log_file,
     verbose,
     base_schema,
+    freeze_schema,
     thesaurus,
     review,
     from_step,
+    profile,
+    model,
     workers,
     confidence_agg,
     append,
+    grow_schema,
+    pass1_only,
+    pass2_only,
     session,
     obsidian_vault,
     neo4j_csv,
@@ -633,6 +708,60 @@ def extract_graph(
     from mykg.orchestrator import PipelineContext, run
     from mykg.pipeline import STEPS
 
+    if grow_schema:
+        append = True
+
+    # Run-only --profile / --model override. Must run before any _cfg() read,
+    # load_adapter(), or the workers default below, so the whole config module
+    # is re-resolved against the selected profile first. Never touches the YAML.
+    if model and not profile:
+        raise click.ClickException("--model requires --profile.")
+    if profile:
+        from mykg import config as _config_mod
+
+        try:
+            _config_mod.activate_profile(profile, model)
+        except ValueError as exc:
+            raise click.ClickException(str(exc)) from exc
+
+    # Default workers / confidence-agg to the (possibly overridden) profile's
+    # values; an explicit --workers N / --confidence-agg still wins.
+    if workers is None:
+        workers = _cfg().PASS2_MAX_WORKERS
+    if confidence_agg is None:
+        confidence_agg = _cfg().ASSEMBLY_CONFIDENCE_AGG
+
+    if freeze_schema:
+        if not base_schema:
+            raise click.ClickException(
+                "--freeze-schema requires --base-schema <path-to-ttl>"
+            )
+        if grow_schema:
+            raise click.ClickException(
+                "--freeze-schema and --append-with-grow-schema are mutually exclusive."
+            )
+        if append:
+            raise click.ClickException(
+                "--freeze-schema and --append are mutually exclusive."
+            )
+
+    if pass1_only and pass2_only:
+        raise click.ClickException(
+            "--pass1-schema-induction-only and --pass2-kg-extraction-only "
+            "are mutually exclusive (they select opposite halves of the pipeline)."
+        )
+    if pass1_only and (append or grow_schema or freeze_schema or from_step):
+        raise click.ClickException(
+            "--pass1-schema-induction-only cannot be combined with --append, "
+            "--append-with-grow-schema, --freeze-schema, or --from-step."
+        )
+    if pass2_only and (append or grow_schema or freeze_schema):
+        raise click.ClickException(
+            "--pass2-kg-extraction-only cannot be combined with --append, "
+            "--append-with-grow-schema, or --freeze-schema."
+        )
+
+    original_input_dir = str(input_dir.resolve())
     sessions_root = _sessions_root()
 
     if session and (output_dir is not None or intermediate_dir is not None):
@@ -688,10 +817,31 @@ def extract_graph(
     if append and from_step:
         raise click.ClickException("--append and --from-step are mutually exclusive.")
 
+    if grow_schema:
+        if base_schema:
+            raise click.ClickException(
+                "--append-with-grow-schema auto-loads the session's schema.ttl as the "
+                "locked base; do not pass --base-schema."
+            )
+        _session_schema_ttl = Path(intermediate_dir) / "schema.ttl"
+        if not _session_schema_ttl.exists():
+            raise click.ClickException(
+                f"--append-with-grow-schema needs an existing schema to lock, but "
+                f"{_session_schema_ttl} was not found. Run a full extract first to "
+                "induce a schema."
+            )
+
     orphan_incremental = False
+    pass1_merge_only = False
     if from_step:
-        from_step, orphan_incremental = _resolve_from_step(from_step)
-        _delete_from_step(from_step, intermediate_dir, output_dir, incremental=orphan_incremental)
+        from_step, orphan_incremental, pass1_merge_only = _resolve_from_step(from_step)
+        _delete_from_step(
+            from_step,
+            intermediate_dir,
+            output_dir,
+            incremental=orphan_incremental,
+            pass1_merge_only=pass1_merge_only,
+        )
 
     if obsidian_vault:
         import mykg.config as _config_mod
@@ -712,17 +862,23 @@ def extract_graph(
     logging.getLogger(__name__).info("LLM endpoint: %s", adapter.endpoint_label())
 
     base = None
-    if base_schema:
+    if grow_schema:
         from mykg.base_schema import parse_base_schema
 
-        base = parse_base_schema(Path(base_schema).read_text())
+        session_schema_ttl = Path(intermediate_dir) / "schema.ttl"
+        base = parse_base_schema(session_schema_ttl.read_text(encoding="utf-8"))
+        base["_source"] = str(session_schema_ttl)
+    elif base_schema:
+        from mykg.base_schema import parse_base_schema
+
+        base = parse_base_schema(Path(base_schema).read_text(encoding="utf-8"))
         base["_source"] = str(base_schema)
 
     thes = None
     if thesaurus:
         from mykg.thesaurus import parse_thesaurus
 
-        thes = parse_thesaurus(Path(thesaurus).read_text(), source=str(thesaurus))
+        thes = parse_thesaurus(Path(thesaurus).read_text(encoding="utf-8"), source=str(thesaurus))
 
     ctx = PipelineContext(
         input_dir=input_dir,
@@ -736,10 +892,29 @@ def extract_graph(
         pass2_workers=workers,
         confidence_agg=confidence_agg,
         append=append,
+        grow_schema=grow_schema,
+        freeze_schema=freeze_schema,
         orphan_incremental=orphan_incremental,
+        pass1_merge_only=pass1_merge_only,
+        stop_after="schema_flatten" if pass1_only else None,
+        pass2_only=pass2_only,
     )
     output_dir.mkdir(parents=True, exist_ok=True)
     intermediate_dir.mkdir(parents=True, exist_ok=True)
+
+    import json as _json
+    raw_input_path = intermediate_dir / "raw_input_folder.json"
+    if not raw_input_path.exists():
+        raw_input_path.write_text(
+            _json.dumps({"original_input_dir": original_input_dir}, indent=2),
+            encoding="utf-8",
+        )
+    working_dir_path = intermediate_dir / "working_directory.json"
+    if not working_dir_path.exists():
+        working_dir_path.write_text(
+            _json.dumps({"working_directory": str(Path.cwd().resolve())}, indent=2),
+            encoding="utf-8",
+        )
 
     run(STEPS, ctx)
 
@@ -900,15 +1075,15 @@ def approve_schema(intermediate_dir, log_file, verbose, session):
     if not schema_path.exists():
         raise click.ClickException(f"schema.json not found in {intermediate_dir}")
 
-    schema = json.loads(schema_path.read_text())
+    schema = json.loads(schema_path.read_text(encoding="utf-8"))
 
     from mykg.exporter import export_ttl
 
     ttl = export_ttl(schema, [], {})
-    (Path(intermediate_dir) / "schema.ttl").write_text(ttl)
+    (Path(intermediate_dir) / "schema.ttl").write_text(ttl, encoding="utf-8")
 
     flag = Path(intermediate_dir) / "schema_approved.flag"
-    flag.write_text("approved")
+    flag.write_text("approved", encoding="utf-8")
     click.echo(
         "Schema approved. schema.ttl regenerated. Resume with the original extract-graph command."
     )
@@ -1023,14 +1198,14 @@ def merge_graphs(
     if base_schema:
         from mykg.base_schema import parse_base_schema
 
-        base = parse_base_schema(Path(base_schema).read_text())
+        base = parse_base_schema(Path(base_schema).read_text(encoding="utf-8"))
         base["_source"] = str(base_schema)
 
     thes = None
     if thesaurus:
         from mykg.thesaurus import parse_thesaurus
 
-        thes = parse_thesaurus(Path(thesaurus).read_text(), source=str(thesaurus))
+        thes = parse_thesaurus(Path(thesaurus).read_text(encoding="utf-8"), source=str(thesaurus))
 
     from mykg.config import MERGE_GRAPHS_HUMAN_REVIEW
     from mykg.merge_orchestrator import run_merge_graphs
@@ -1061,7 +1236,7 @@ def merge_graphs(
 # MinerU cannot convert HTML; the pipeline's `step_preprocess` routes HTML
 # files through markdownify instead. `parse-docs` is MinerU-only and therefore
 # always skips these suffixes regardless of `preprocess.extensions`.
-_PARSE_DOCS_HARDCODED_SKIP: frozenset[str] = frozenset({".html", ".htm"})
+_PARSE_DOCS_HARDCODED_SKIP: frozenset[str] = frozenset({".html", ".htm", ".txt"})
 
 
 def _build_parse_docs_targets(
@@ -1091,8 +1266,8 @@ def _build_parse_docs_targets(
         if suffix in _PARSE_DOCS_HARDCODED_SKIP:
             return (
                 False,
-                f"{suffix} is not supported by parse-docs (MinerU cannot convert HTML); "
-                "use `mykg extract-graph` for HTML support via markdownify",
+                f"{suffix} is not supported by parse-docs; "
+                "use `mykg extract-graph` which handles it in-process",
             )
         if allowed_exts is not None and suffix not in allowed_exts:
             return False, f"extension {suffix or '(none)'} not in preprocess.extensions"
@@ -1102,9 +1277,7 @@ def _build_parse_docs_targets(
         for f in files:
             resolved = f if f.is_absolute() else (input_path / f)
             ok, reason = _passes_filter(resolved)
-            rel_parent = (
-                f.parent if not f.is_absolute() and f.parent != Path(".") else Path()
-            )
+            rel_parent = f.parent if not f.is_absolute() and f.parent != Path(".") else Path()
             per_file_out = output_path / rel_parent
             if ok:
                 targets.append((resolved, per_file_out))
@@ -1243,9 +1416,7 @@ def parse_docs(
         )
 
     allowed_exts = None if no_filter else _cfg.PREPROCESS_EXTENSIONS
-    targets, skipped = _build_parse_docs_targets(
-        input_path, output_path, files, allowed_exts
-    )
+    targets, skipped = _build_parse_docs_targets(input_path, output_path, files, allowed_exts)
 
     if skipped:
         for src, reason in skipped:
@@ -1303,30 +1474,412 @@ def parse_docs(
             f"{len(failures)} failed — output under: {output_path}",
             err=True,
         )
-        raise click.ClickException(
-            f"{len(failures)} of {len(targets)} files failed conversion"
-        )
+        raise click.ClickException(f"{len(failures)} of {len(targets)} files failed conversion")
     click.echo(f"Done. Output written to: {output_path}")
 
 
-# Aliases for --from-step that encode the orphan-connect sweep mode.
-# Maps alias → (real_step_name, orphan_incremental)
-_FROM_STEP_ALIASES: dict[str, tuple[str, bool]] = {
-    "orphan_connect_fullsweep": ("orphan_connect", False),
-    "orphan_connect_incremental": ("orphan_connect", True),
+def _github_clone_seed(seed_url, out_dir, _cfg, fw, *, ignored_notice=None):
+    """Clone+filter a GitHub repo seed into `out_dir`; return a manifest dict
+    shaped for `write_manifest`'s per-seed `seeds[]` entries (plus `pages`)."""
+    owner, repo = fw.is_github_repo_url(seed_url)
+    if ignored_notice:
+        click.echo(ignored_notice)
+    repo_dir = out_dir / "_repo"
+    input_dir = out_dir / "input"
+    click.echo(f"Cloning {owner}/{repo} (depth={_cfg.FETCH_GITHUB_CLONE_DEPTH}) → {repo_dir}")
+    fw.clone_github_repo(
+        owner,
+        repo,
+        repo_dir,
+        depth=_cfg.FETCH_GITHUB_CLONE_DEPTH,
+        timeout_seconds=_cfg.FETCH_GITHUB_CLONE_TIMEOUT_SECONDS,
+    )
+    if input_dir.exists():
+        shutil.rmtree(input_dir)
+    filter_result = fw.filter_repo_files(repo_dir, input_dir, _cfg.PREPROCESS_EXTENSIONS)
+    stats = {
+        "files_total": filter_result["total_files"],
+        "files_copied": filter_result["copied_count"],
+        "files_skipped": len(filter_result["skipped"]),
+    }
+    click.echo(
+        f"Done. {stats['files_copied']}/{stats['files_total']} files copied → {input_dir}\n"
+        f"Next: mykg extract-graph {input_dir}/"
+    )
+    return {
+        "seed_url": seed_url,
+        "strategy": "github_clone",
+        "output_subdir": out_dir.name,
+        "stats": stats,
+        "pages": {},
+    }
+
+
+def _crawlee_ignored_options_notice(
+    max_pages, max_depth, strategy, download_assets, delay, concurrency, no_robots, force
+):
+    """One-line notice when Crawlee-only options are passed for a GitHub seed."""
+    non_default = any(
+        [
+            max_pages is not None,
+            max_depth is not None,
+            strategy is not None,
+            download_assets is not None,
+            delay is not None,
+            concurrency is not None,
+            no_robots,
+            force,
+        ]
+    )
+    if not non_default:
+        return None
+    return "Note: Crawlee options (--max-pages, --max-depth, etc.) are ignored for GitHub repo URLs (git-clone path)."
+
+
+@cli.command("fetch-web")
+@click.argument("url", required=False)
+@click.option(
+    "--url-list",
+    default=None,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="File of seed URLs (one per line, # comments ignored). "
+    "Mutually exclusive with URL; requires --output.",
+)
+@click.option(
+    "--output",
+    default=None,
+    type=click.Path(path_type=Path),
+    help="Target folder (default: ./<fetch.output_dir>/<domain>/; required with --url-list).",
+)
+@click.option("--max-pages", default=None, type=int, help="Cap on total fetched pages.")
+@click.option(
+    "--max-depth",
+    default=None,
+    type=int,
+    help="Max crawl depth from seed (default: inferred — 0 for a "
+    "specific page, fetch.max_depth for a bare domain).",
+)
+@click.option(
+    "--strategy",
+    default=None,
+    type=click.Choice(["same-domain", "same-origin", "all"]),
+    help="Link-following scope (default from config; 'all' leaves the domain).",
+)
+@click.option(
+    "--download-assets/--no-download-assets",
+    default=None,
+    help="Download linked binaries in preprocess.extensions (default from config).",
+)
+@click.option("--delay", default=None, type=float, help="Per-request delay seconds.")
+@click.option("--concurrency", default=None, type=int, help="Max concurrent requests.")
+@click.option("--no-robots", is_flag=True, help="Disable robots.txt compliance.")
+@click.option("--force", is_flag=True, help="Ignore prior manifest; re-fetch everything.")
+@click.option("--verbose", "-v", is_flag=True, help="Enable DEBUG-level logging.")
+def fetch_web(
+    url,
+    url_list,
+    output,
+    max_pages,
+    max_depth,
+    strategy,
+    download_assets,
+    delay,
+    concurrency,
+    no_robots,
+    force,
+    verbose,
+):
+    """Crawl a website (or clone a GitHub repo) and write fetch_manifest.json.
+
+    The folder is a normal `extract-graph` input: the preprocess step converts
+    the saved HTML to Markdown (and any downloaded PDFs/DOCX via MinerU). Crawlee
+    runs inside an ephemeral uv venv that is destroyed on exit — nothing about
+    the crawler is installed into mykg's own interpreter.
+
+    A `https://github.com/<owner>/<repo>` URL is shallow-cloned with `git`
+    instead of crawled; the clone lands in `<output>/_repo/` and is filtered
+    down to extract-graph-consumable files in `<output>/input/`.
+
+    `--url-list <file>` fetches multiple seeds (one URL per line, blank/`#`
+    lines ignored) into per-seed subfolders under `--output`. Each seed gets
+    its own caps (no shared budget); GitHub seeds are cloned, others crawled.
+    All Crawlee seeds in a `--url-list` share a single ephemeral venv, run in
+    parallel bounded by `fetch.max_workers`.
+
+    Examples:
+        mykg fetch-web https://example.com
+        mykg extract-graph ./mykg_web_fetch/example.com/
+
+        mykg fetch-web https://github.com/SenolIsci/mykg
+        mykg extract-graph ./mykg_web_fetch/github.com_SenolIsci_mykg/input/
+
+        mykg fetch-web --url-list urls.txt --output ./mykg_web_fetch/batch/
+    """
+    from mykg.logging import setup
+
+    setup(log_file=None, verbose=verbose)
+
+    from mykg import config as _cfg
+    from mykg import fetch_web as fw
+
+    if not _cfg.FETCH_ENABLED:
+        raise click.ClickException(
+            "fetch-web is disabled (fetch.enabled: false in mykg_config.yaml)"
+        )
+
+    if url and url_list:
+        raise click.UsageError("Pass either URL or --url-list, not both.")
+    if not url and not url_list:
+        raise click.UsageError("Pass either a URL or --url-list <file>.")
+    if url_list and not output:
+        raise click.UsageError("--output is required when using --url-list.")
+
+    strat = strategy or _cfg.FETCH_STRATEGY
+    dl_assets = _cfg.FETCH_DOWNLOAD_ASSETS if download_assets is None else download_assets
+    allowed = sorted(_cfg.PREPROCESS_EXTENSIONS) if dl_assets else []
+    ignored_notice = _crawlee_ignored_options_notice(
+        max_pages,
+        max_depth,
+        strategy,
+        download_assets,
+        delay,
+        concurrency,
+        no_robots,
+        force,
+    )
+
+    def _seed_crawl_cfg(seed_url, seed_out_dir, prior):
+        depth = (
+            max_depth
+            if max_depth is not None
+            else fw.infer_max_depth(seed_url, _cfg.FETCH_MAX_DEPTH)
+        )
+        cfg = fw.build_crawl_config(
+            seed_url=seed_url,
+            output_dir=str(seed_out_dir),
+            strategy=strat,
+            max_pages=max_pages if max_pages is not None else _cfg.FETCH_MAX_PAGES,
+            max_depth=depth,
+            respect_robots=(False if no_robots else _cfg.FETCH_RESPECT_ROBOTS),
+            request_delay_seconds=delay if delay is not None else _cfg.FETCH_REQUEST_DELAY_SECONDS,
+            concurrency=concurrency if concurrency is not None else _cfg.FETCH_CONCURRENCY,
+            allowed_asset_exts=allowed,
+        )
+        cfg["already_fetched"] = {u: e.get("sha256") for u, e in prior.items()}
+        return cfg
+
+    runner = Path(__file__).parent / "data" / "_crawl_runner.py"
+
+    # --- Single seed (existing behaviour, plus GitHub-clone + depth inference) ---
+    if url:
+        out_dir = Path(output) if output else fw.default_output_dir(url, _cfg.FETCH_OUTPUT_DIR)
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        if _cfg.FETCH_GITHUB_CLONE_ENABLED and fw.is_github_repo_url(url):
+            entry = _github_clone_seed(url, out_dir, _cfg, fw, ignored_notice=ignored_notice)
+            fw.write_manifest(
+                out_dir,
+                seed_url=url,
+                strategy="github_clone",
+                pages={},
+                stats=entry["stats"],
+            )
+            return
+
+        prior = {} if force else fw.load_manifest(out_dir)
+        crawl_cfg = _seed_crawl_cfg(url, out_dir, prior)
+
+        config_path = out_dir / ".fetch_config.json"
+        config_path.write_text(json.dumps(crawl_cfg, indent=2), encoding="utf-8")
+
+        click.echo(
+            f"Crawling {url} → {out_dir} (strategy={strat}, max_pages={crawl_cfg['max_pages']}, max_depth={crawl_cfg['max_depth']})"
+        )
+        with ephemeral_venv(
+            _cfg.FETCH_UV_PYTHON_VERSION,
+            _cfg.FETCH_CRAWLEE_SPEC,
+            _cfg.FETCH_UV_PATH,
+            _cfg.FETCH_INSTALL_TIMEOUT_SECONDS,
+            bin_name="python",
+            prefix="mykg-crawl-venv-",
+        ) as venv_python:
+            try:
+                proc = subprocess.run(
+                    [str(venv_python), str(runner), str(config_path)],
+                    check=False,
+                    timeout=_cfg.FETCH_TIMEOUT_SECONDS,
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise click.ClickException(
+                    f"crawl timed out after {_cfg.FETCH_TIMEOUT_SECONDS}s"
+                ) from exc
+            if proc.returncode != 0:
+                raise click.ClickException(f"crawl runner failed with exit code {proc.returncode}")
+
+        results_path = out_dir / ".fetch_results.json"
+        if not results_path.exists():
+            raise click.ClickException("crawl runner produced no results file")
+        results = json.loads(results_path.read_text(encoding="utf-8"))
+
+        merged = dict(prior)
+        merged.update(results.get("pages", {}))
+        fw.write_manifest(
+            out_dir,
+            seed_url=url,
+            strategy=strat,
+            pages=merged,
+            stats=results.get("stats", {}),
+            crawlee_version=results.get("crawlee_version", ""),
+        )
+        config_path.unlink(missing_ok=True)
+        results_path.unlink(missing_ok=True)
+        click.echo(
+            f"Done. {results.get('stats', {}).get('pages', 0)} pages, "
+            f"{results.get('stats', {}).get('assets', 0)} assets → {out_dir}\n"
+            f"Next: mykg extract-graph {out_dir}/"
+        )
+        return
+
+    # --- --url-list: multiple independent seeds, one shared venv for Crawlee ---
+    out_root = Path(output)
+    out_root.mkdir(parents=True, exist_ok=True)
+    seed_urls = fw.parse_url_list(url_list)
+    if not seed_urls:
+        raise click.ClickException(f"--url-list {url_list} contained no URLs")
+
+    seed_entries: list[dict] = []
+    crawlee_seeds: list[dict] = []  # (seed_url, seed_out_dir, prior) for config building
+    crawlee_configs: list[dict] = []
+
+    for seed_url in seed_urls:
+        if _cfg.FETCH_GITHUB_CLONE_ENABLED and fw.is_github_repo_url(seed_url):
+            owner, repo = fw.is_github_repo_url(seed_url)
+            seed_out_dir = out_root / f"github.com_{owner}_{repo}"
+            seed_out_dir.mkdir(parents=True, exist_ok=True)
+            entry = _github_clone_seed(
+                seed_url, seed_out_dir, _cfg, fw, ignored_notice=ignored_notice
+            )
+            seed_entries.append(entry)
+        else:
+            seed_out_dir = out_root / fw.seed_subdir_name(seed_url)
+            seed_out_dir.mkdir(parents=True, exist_ok=True)
+            prior = {} if force else fw.load_manifest(seed_out_dir)
+            cfg = _seed_crawl_cfg(seed_url, seed_out_dir, prior)
+            crawlee_seeds.append((seed_url, seed_out_dir, prior))
+            crawlee_configs.append(cfg)
+
+    if crawlee_configs:
+        combined_cfg = {
+            "seeds": crawlee_configs,
+            "max_workers": _cfg.FETCH_MAX_WORKERS,
+            "output_dir": str(out_root),
+        }
+        config_path = out_root / ".fetch_config.json"
+        config_path.write_text(json.dumps(combined_cfg, indent=2), encoding="utf-8")
+
+        click.echo(
+            f"Crawling {len(crawlee_configs)} seed(s) → {out_root} "
+            f"(max_workers={_cfg.FETCH_MAX_WORKERS})"
+        )
+        with ephemeral_venv(
+            _cfg.FETCH_UV_PYTHON_VERSION,
+            _cfg.FETCH_CRAWLEE_SPEC,
+            _cfg.FETCH_UV_PATH,
+            _cfg.FETCH_INSTALL_TIMEOUT_SECONDS,
+            bin_name="python",
+            prefix="mykg-crawl-venv-",
+        ) as venv_python:
+            try:
+                proc = subprocess.run(
+                    [str(venv_python), str(runner), str(config_path)],
+                    check=False,
+                    timeout=_cfg.FETCH_TIMEOUT_SECONDS,
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise click.ClickException(
+                    f"crawl timed out after {_cfg.FETCH_TIMEOUT_SECONDS}s"
+                ) from exc
+            if proc.returncode != 0:
+                raise click.ClickException(f"crawl runner failed with exit code {proc.returncode}")
+
+        results_path = out_root / ".fetch_results.json"
+        if not results_path.exists():
+            raise click.ClickException("crawl runner produced no results file")
+        results = json.loads(results_path.read_text(encoding="utf-8"))
+        seed_results = results.get("seeds", [])
+
+        for (seed_url, seed_out_dir, prior), seed_result in zip(crawlee_seeds, seed_results):
+            merged = dict(prior)
+            merged.update(seed_result.get("pages", {}))
+            stats = seed_result.get("stats", {})
+            fw.write_manifest(
+                seed_out_dir,
+                seed_url=seed_url,
+                strategy=strat,
+                pages=merged,
+                stats=stats,
+                crawlee_version=seed_result.get("crawlee_version", ""),
+            )
+            click.echo(
+                f"Done. {stats.get('pages', 0)} pages, {stats.get('assets', 0)} assets → {seed_out_dir}"
+            )
+            seed_entries.append(
+                {
+                    "seed_url": seed_url,
+                    "strategy": strat,
+                    "output_subdir": seed_out_dir.relative_to(out_root).as_posix(),
+                    "stats": stats,
+                    "pages": merged,
+                }
+            )
+
+        config_path.unlink(missing_ok=True)
+        results_path.unlink(missing_ok=True)
+
+    # Aggregate stats and pages across all seeds for the top-level manifest.
+    summed_stats: dict = {}
+    union_pages: dict = {}
+    for entry in seed_entries:
+        for key, val in entry["stats"].items():
+            if isinstance(val, (int, float)):
+                summed_stats[key] = summed_stats.get(key, 0) + val
+        union_pages.update(entry["pages"])
+
+    manifest_seeds = [{k: v for k, v in entry.items() if k != "pages"} for entry in seed_entries]
+    fw.write_manifest(
+        out_root,
+        seed_url=None,
+        strategy=None,
+        pages=union_pages,
+        stats=summed_stats,
+        seeds=manifest_seeds,
+    )
+    click.echo(f"Done. {len(seed_entries)} seed(s) fetched → {out_root}")
+
+
+# Aliases for --from-step that encode the orphan-connect sweep mode or the
+# Pass 1 merge_proposals shortcut.
+# Maps alias → (real_step_name, orphan_incremental, pass1_merge_only)
+_FROM_STEP_ALIASES: dict[str, tuple[str, bool, bool]] = {
+    "orphan_connect_fullsweep": ("orphan_connect", False, False),
+    "orphan_connect_incremental": ("orphan_connect", True, False),
+    "merge_proposals": ("pass1", False, True),
 }
 
 
-def _resolve_from_step(step_name: str) -> tuple[str, bool]:
-    """Resolve a --from-step value to (real_step_name, orphan_incremental).
+def _resolve_from_step(step_name: str) -> tuple[str, bool, bool]:
+    """Resolve a --from-step value to (real_step_name, orphan_incremental, pass1_merge_only).
 
     'orphan_connect_fullsweep' and 'orphan_connect_incremental' both map to
-    the real step 'orphan_connect' with different sweep modes. All other step
-    names pass through unchanged with orphan_incremental=False.
+    the real step 'orphan_connect' with different sweep modes. 'merge_proposals'
+    maps to the real step 'pass1' but skips LLM batch dispatch entirely,
+    reconstructing proposals from intermediate/pass1_batch_proposals/ shards
+    and jumping straight to merge/harmonize/quality-review. All other step
+    names pass through unchanged with both flags False.
     """
     if step_name in _FROM_STEP_ALIASES:
         return _FROM_STEP_ALIASES[step_name]
-    return step_name, False
+    return step_name, False, False
 
 
 def _delete_from_step(
@@ -1335,6 +1888,7 @@ def _delete_from_step(
     output_dir: Path,
     *,
     incremental: bool = False,
+    pass1_merge_only: bool = False,
 ) -> None:
     from mykg.pipeline import STEPS
 
@@ -1369,15 +1923,39 @@ def _delete_from_step(
     # and skips all files, making Re-entry B a silent no-op.
     pass2_idx = step_names.index("pass2") if "pass2" in step_names else -1
     if pass2_idx >= 0 and idx <= pass2_idx:
-        for shard_dir_name in ("raw_extractions_shards", "chunk_index_shards"):
+        for shard_dir_name in (
+            "raw_extractions_shards",
+            "chunk_index_shards",
+            "pass2_raw_batches",
+        ):
             shard_path = intermediate_dir / shard_dir_name
             if shard_path.exists():
                 shutil.rmtree(shard_path)
                 click.echo(f"Deleted {shard_path}")
-        concat_map_path = intermediate_dir / "pass2_concat_map.json"
-        if concat_map_path.exists():
-            concat_map_path.unlink()
-            click.echo(f"Deleted {concat_map_path}")
+        # pass2_concat_map.json is legacy (pre real-keyed concat); pass2_batch_map.json
+        # is written by the current concat/batch_chunks engines. Clear both on re-entry.
+        for map_name in ("pass2_concat_map.json", "pass2_batch_map.json"):
+            map_path = intermediate_dir / map_name
+            if map_path.exists():
+                map_path.unlink()
+                click.echo(f"Deleted {map_path}")
+
+    # pass1_batch_selection.json / pass1_batch_proposals/ are not listed in
+    # Step.outputs but must be cleared when re-running from pass1 or earlier —
+    # otherwise run_pass1() finds existing shards and skips re-dispatching
+    # those batches, making a plain --from-step pass1 a silent partial no-op.
+    # The one exception is --from-step merge_proposals, whose entire purpose
+    # is to reuse these exact files — it must NOT delete them.
+    pass1_idx = step_names.index("pass1") if "pass1" in step_names else -1
+    if pass1_idx >= 0 and idx <= pass1_idx and not pass1_merge_only:
+        selection_path = intermediate_dir / "pass1_batch_selection.json"
+        if selection_path.exists():
+            selection_path.unlink()
+            click.echo(f"Deleted {selection_path}")
+        batch_proposals_path = intermediate_dir / "pass1_batch_proposals"
+        if batch_proposals_path.exists():
+            shutil.rmtree(batch_proposals_path)
+            click.echo(f"Deleted {batch_proposals_path}")
 
     # obsidian_vault/ and neo4j_csv/ are written by validate_graph but not tracked in
     # Step.outputs (they are optional; omitting them prevents _is_done from breaking
@@ -1432,7 +2010,11 @@ def _delete_merge_from_step(
         step_names.index("merge_reextract") if "merge_reextract" in step_names else -1
     )
     if merge_reextract_idx >= 0 and idx <= merge_reextract_idx:
-        for shard_dir_name in ("raw_extractions_shards", "chunk_index_shards"):
+        for shard_dir_name in (
+            "raw_extractions_shards",
+            "chunk_index_shards",
+            "pass2_raw_batches",
+        ):
             shard_path = intermediate_dir / shard_dir_name
             if shard_path.exists():
                 shutil.rmtree(shard_path)
@@ -1444,6 +2026,133 @@ def _delete_merge_from_step(
         if flag_path.exists():
             flag_path.unlink()
             click.echo(f"Deleted {flag_path}")
+
+
+def _mcp_pid_path() -> Path:
+    """Return the path to the MCP server PID file."""
+    d = Path.home() / ".mykg"
+    d.mkdir(exist_ok=True)
+    return d / "mcp-serve.pid"
+
+
+def _resolve_session_root(session: str | None) -> Path:
+    """Resolve a session root from --session (named dir) or the newest completed session.
+
+    Raises click.ClickException with a specific message when no sessions dir,
+    no completed sessions, or the chosen session lacks output/nodes.jsonl.
+    """
+    sessions_root = _sessions_root()
+
+    if session:
+        session_root = sessions_root / session
+    else:
+        if not sessions_root.exists():
+            raise click.ClickException(
+                f"No sessions directory at {sessions_root}. "
+                "Run 'mykg extract-graph <dir>' first."
+            )
+        entries = sorted(
+            [
+                d for d in sessions_root.iterdir()
+                if d.is_dir() and (d / "output" / "nodes.jsonl").exists()
+            ],
+            key=lambda d: d.name,
+        )
+        if not entries:
+            raise click.ClickException(
+                f"No completed sessions found under {sessions_root}. "
+                "Run 'mykg extract-graph <dir>' first."
+            )
+        session_root = entries[-1]
+
+    nodes_path = session_root / "output" / "nodes.jsonl"
+    if not nodes_path.exists():
+        raise click.ClickException(
+            f"Session '{session_root.name}' has no output/nodes.jsonl. "
+            "Is the extraction complete?"
+        )
+
+    return session_root
+
+
+@cli.command("mcp-serve")
+@click.option("--session", default=None, help="Session name under mykg_sessions/; defaults to latest.")
+@click.option(
+    "--transport",
+    type=click.Choice(["stdio", "streamable_http"]),
+    default=None,
+    help="MCP transport (default from config or stdio).",
+)
+@click.option("--host", default=None, help="Host for streamable HTTP (default from config).")
+@click.option("--port", default=None, type=int, help="Port for streamable HTTP (default from config).")
+@click.option("--stop", is_flag=True, default=False, help="Stop a running MCP server.")
+def mcp_serve(session, transport, host, port, stop):
+    """Start (or stop) an MCP server to query a knowledge graph session."""
+    import os
+    import signal
+
+    pid_path = _mcp_pid_path()
+
+    if stop:
+        if not pid_path.exists():
+            click.echo("No MCP server is running (no PID file found).")
+            return
+        try:
+            pid = int(pid_path.read_text(encoding="utf-8").strip())
+            if sys.platform == "win32":
+                os.kill(pid, signal.CTRL_BREAK_EVENT)
+            else:
+                os.kill(pid, signal.SIGTERM)
+            click.echo(f"MCP server stopped (PID {pid}).")
+        except ProcessLookupError:
+            click.echo(f"MCP server process (PID {pid}) not found — stale PID file removed.")
+        except ValueError:
+            click.echo("Corrupt PID file — removing.")
+        pid_path.unlink(missing_ok=True)
+        return
+
+    cfg = _cfg()
+
+    if not getattr(cfg, "MCP_ENABLED", False):
+        raise click.ClickException(
+            "MCP server is disabled. Set mcp.enabled: true in mykg_config.yaml "
+            "under your active profile, then re-run."
+        )
+
+    session_root = _resolve_session_root(session)
+
+    transport = transport or getattr(cfg, "MCP_TRANSPORT", "stdio")
+    host = host or getattr(cfg, "MCP_HOST", "localhost")
+    port = port or getattr(cfg, "MCP_PORT", 3100)
+
+    if transport == "streamable_http":
+        pid_path.write_text(str(os.getpid()), encoding="utf-8")
+
+    click.echo(
+        f"Serving session '{session_root.name}' via {transport}"
+        + (f" on {host}:{port}" if transport == "streamable_http" else ""),
+        err=True,
+    )
+
+    try:
+        from mykg.mcp_server import run_server
+        run_server(session_root, transport=transport, host=host, port=port)
+    finally:
+        pid_path.unlink(missing_ok=True)
+
+
+@cli.command("query")
+@click.argument("question")
+@click.option("--session", default=None, help="Session name under mykg_sessions/; defaults to latest.")
+@click.option("--mode", type=click.Choice(["bfs", "dfs"]), default="bfs", help="Traversal mode.")
+@click.option("--depth", default=2, type=int, help="Traversal depth limit.")
+@click.option("--token-budget", "token_budget", default=2000, type=int, help="Approx token budget for the returned context.")
+def query(question, session, mode, depth, token_budget):
+    """Query the knowledge graph from the terminal (mirrors the MCP query tool)."""
+    session_root = _resolve_session_root(session)
+    from mykg.query import build_query_graph, query_graph
+    qg = build_query_graph(session_root)
+    click.echo(query_graph(qg, question, mode=mode, depth=depth, token_budget=token_budget))
 
 
 def main():

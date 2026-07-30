@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Literal
 
+import click
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 if TYPE_CHECKING:
@@ -55,6 +56,12 @@ class PipelineContext(BaseModel):
     thesaurus: Any = None  # SynonymIndex | None — Any to avoid forward-ref issues
     review: bool = False
     append: bool = False
+    # --append-with-grow-schema (D52): run locked Pass 1 over changed files only so
+    # the LLM may ADD new concepts/properties to the existing (locked) schema, then
+    # surgically back-fill old files when the schema actually grows.
+    grow_schema: bool = False
+    # --freeze-schema: use base_schema verbatim — skip LLM schema induction entirely.
+    freeze_schema: bool = False
     # Runtime fields populated by steps
     all_chunks: list | None = None
     file_contents: dict[str, str] | None = None
@@ -77,6 +84,17 @@ class PipelineContext(BaseModel):
     # Set by --from-step orphan_connect_incremental: load prior orphan_connections.json
     # as a seed and only re-send unresolved groups to the LLM.
     orphan_incremental: bool = False
+    # Set by --from-step merge_proposals: skip Pass 1 LLM dispatch entirely and
+    # reconstruct proposals from intermediate/pass1_batch_proposals/ shards,
+    # jumping straight to merge/harmonize/quality-review.
+    pass1_merge_only: bool = False
+    # Set by --pass1-schema-induction-only: halt the run right after this step
+    # completes successfully. None = run to completion (default).
+    stop_after: str | None = None
+    # Set by --pass2-kg-extraction-only: skip pass1/schema_validate/human_review
+    # (schema must already exist); unlike --append, NOT restricted to
+    # new/modified files — extracts the full corpus normally.
+    pass2_only: bool = False
 
 
 class Step(BaseModel):
@@ -146,7 +164,7 @@ class PipelineState(BaseModel):
             "errors": self.errors,
         }
         (intermediate_dir / "pipeline_state.json").write_text(
-            json.dumps(payload, indent=_cfg.JSON_INDENT)
+            json.dumps(payload, indent=_cfg.JSON_INDENT), encoding="utf-8"
         )
 
     @classmethod
@@ -154,7 +172,7 @@ class PipelineState(BaseModel):
         path = intermediate_dir / "pipeline_state.json"
         if not path.exists():
             return cls(step_names=step_names)
-        data = json.loads(path.read_text())
+        data = json.loads(path.read_text(encoding="utf-8"))
         state = cls(step_names=step_names)
         state.steps = data.get("steps", {})
         state.errors = data.get("errors", {})
@@ -165,14 +183,26 @@ class PipelineState(BaseModel):
         return state
 
 
-def _try_run(step: Step, ctx: PipelineContext) -> str | None:
+def _try_run(step: Step, ctx: PipelineContext) -> tuple[str | None, bool]:
+    """Run one step, returning (error_message, non_retryable).
+
+    non_retryable is True when the failure is a click.ClickException — a
+    precondition/usage error raised deliberately by step code (e.g. "no
+    batch proposals found for --from-step merge_proposals"). These are not
+    LLM content errors, so retrying the step or asking the LLM feedback
+    handler to "fix" schema.json cannot resolve them and only wastes time
+    (or, if the feedback handler misfires on an unrelated error, can crash
+    with a masking exception of its own).
+    """
     try:
         step.fn(ctx)
-        return None
+        return None, False
     except SchemaUpdatedError:
         raise  # propagate; orchestrator handles restart
+    except click.ClickException as exc:
+        return str(exc.message if hasattr(exc, "message") else exc), True
     except Exception as exc:
-        return str(exc)
+        return str(exc), False
 
 
 def _log_advisory(step: Step, error: str, ctx: PipelineContext) -> None:
@@ -239,6 +269,13 @@ _APPEND_PRESERVE_OUTPUTS = {"raw_extractions.json", "chunk_node_index.json", "ra
 
 APPEND_SKIP_STEPS: frozenset[str] = frozenset({"pass1", "schema_validate", "human_review"})
 
+# --pass2-kg-extraction-only: same steps skipped as --append, but the run is
+# NOT restricted to changed files — full corpus re-extraction. schema_flatten
+# is deliberately excluded from this set so it always re-runs (cheap, no LLM)
+# and picks up any manual edits made to schema.json between a prior
+# --pass1-schema-induction-only run and this one.
+PASS2_ONLY_SKIP_STEPS: frozenset[str] = frozenset({"pass1", "schema_validate", "human_review"})
+
 
 def _invalidate_append_downstream(
     steps: list[Step], ctx: PipelineContext, state: "PipelineState"
@@ -278,6 +315,12 @@ def run(steps: list[Step], ctx: PipelineContext) -> None:
             f"No existing pipeline found in {ctx.intermediate_dir}. Run without --append first."
         )
 
+    if ctx.pass2_only and not (ctx.intermediate_dir / "schema.json").exists():
+        raise RuntimeError(
+            f"No existing schema found in {ctx.intermediate_dir}. "
+            "Run with --pass1-schema-induction-only (or a normal run) first."
+        )
+
     step_names = [s.name for s in steps]
     state = PipelineState.load(ctx.intermediate_dir, step_names)
 
@@ -286,16 +329,39 @@ def run(steps: list[Step], ctx: PipelineContext) -> None:
     while True:
         schema_restart_triggered = False
 
+        # In --append-with-grow-schema mode, pass1/schema_validate must run again so
+        # the locked Pass 1 can add new concepts/properties. human_review stays
+        # skipped unless --review is also set, in which case it is un-skipped so the
+        # gate (handled below via requires_review_flag) can pause for review of the
+        # grown schema. All other append skips remain in force (D52).
+        append_skip = APPEND_SKIP_STEPS
+        if ctx.grow_schema:
+            append_skip = APPEND_SKIP_STEPS - {"pass1", "schema_validate"}
+            if ctx.review:
+                append_skip = append_skip - {"human_review"}
+
         for step in steps:
-            if ctx.append and step.name in APPEND_SKIP_STEPS:
+            if ctx.append and step.name in append_skip:
                 log.info("SKIP %s — append mode", step.name)
                 continue
 
-            # In append mode, ingest must always run (detect new files) and pass2
+            if ctx.pass2_only and step.name in PASS2_ONLY_SKIP_STEPS:
+                log.info("SKIP %s — --pass2-kg-extraction-only", step.name)
+                continue
+
+            # In append mode, preprocess and ingest must always run, and pass2
             # must always run when new files exist (raw_extractions.json is preserved
             # for merge but still needs updating — _is_done would skip it otherwise).
+            # preprocess is force-run so its own SHA-based change detection (D49) can
+            # convert newly-added non-MD files; _is_done would otherwise skip it because
+            # the preprocess.done sentinel survives from the initial run. The step is a
+            # cheap no-op when no source files changed (and when preprocess is disabled).
+            # In --append-with-grow-schema mode, pass1 must also be force-run so a
+            # stale schema.json doesn't cause _is_done to skip the locked re-induction.
             _append_force = ctx.append and step.name in (
+                "preprocess",
                 "ingest",
+                *(("pass1", "schema_validate", "schema_flatten") if ctx.grow_schema else ()),
                 *(("pass2",) if ctx.append_new_files else ()),
             )
             if _is_done(step, ctx) and not _append_force:
@@ -335,7 +401,7 @@ def run(steps: list[Step], ctx: PipelineContext) -> None:
             state.save(ctx.intermediate_dir)
 
             try:
-                error = _try_run(step, ctx)
+                error, non_retryable = _try_run(step, ctx)
             except (KeyboardInterrupt, SystemExit) as exc:
                 # Signal or Ctrl-C — save failure before the process exits so
                 # pipeline_state.json doesn't stay stuck as "running".
@@ -409,9 +475,9 @@ def run(steps: list[Step], ctx: PipelineContext) -> None:
                 if _schema_json_path.exists():
                     from mykg.exporter import export_ttl as _export_ttl
 
-                    _updated_schema = json.loads(_schema_json_path.read_text())
+                    _updated_schema = json.loads(_schema_json_path.read_text(encoding="utf-8"))
                     _ttl_text = _export_ttl(_updated_schema, [], {})
-                    (ctx.intermediate_dir / "schema.ttl").write_text(_ttl_text)
+                    (ctx.intermediate_dir / "schema.ttl").write_text(_ttl_text, encoding="utf-8")
                     log.info(
                         "Schema-gap restart — regenerated schema.ttl "
                         "(%d concept(s), %d property/properties)",
@@ -427,21 +493,34 @@ def run(steps: list[Step], ctx: PipelineContext) -> None:
                 schema_restart_triggered = True
                 break  # restart the for-loop via the outer while
 
-            if error:
+            if error and non_retryable:
+                log.warning(
+                    "PRECONDITION FAILED %s — %s (skipping retry and LLM feedback; "
+                    "this is a usage/precondition error, not a transient or content error)",
+                    step.name,
+                    error,
+                )
+
+            if error and not non_retryable:
                 log.warning("RETRY %s — attempt 1 failed: %s", step.name, error)
-                error = _try_run(step, ctx)
+                error, non_retryable = _try_run(step, ctx)
 
             llm_correction = False
-            if error and step.is_llm_step:
+            if error and not non_retryable and step.is_llm_step:
                 log.warning("FEEDBACK %s — requesting LLM correction", step.name)
                 try:
                     llm_correction = feedback.apply(step.name, error, ctx)
                 except Exception as fb_exc:
                     log.warning("Feedback handler failed: %s", fb_exc)
-                error = _try_run(step, ctx)
+                error, non_retryable = _try_run(step, ctx)
 
             if error:
-                attempts = 3 if (step.is_llm_step and llm_correction) else 2
+                if non_retryable:
+                    attempts = 1
+                elif step.is_llm_step and llm_correction:
+                    attempts = 3
+                else:
+                    attempts = 2
                 state.mark_failed(
                     step.name, error, attempts=attempts, llm_correction=llm_correction
                 )
@@ -462,6 +541,12 @@ def run(steps: list[Step], ctx: PipelineContext) -> None:
             state.mark_done(step.name)
             state.save(ctx.intermediate_dir)
             log.info("DONE %s", step.name)
+
+            if ctx.stop_after and step.name == ctx.stop_after:
+                log.info(
+                    "STOP — halted after step '%s' (--pass1-schema-induction-only)", step.name
+                )
+                return
 
         if not schema_restart_triggered:
             break  # all steps completed (or we returned early); exit the while loop

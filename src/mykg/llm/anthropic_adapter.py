@@ -7,7 +7,12 @@ from typing import TYPE_CHECKING
 import anthropic
 
 from mykg.llm.adapter import LLMAdapter
-from mykg.llm.retry import retry_on_rate_limit
+from mykg.llm.retry import (
+    log_context_overflow,
+    log_truncated_output,
+    looks_like_context_exceeded,
+    retry_on_rate_limit,
+)
 from mykg.logging import record_llm_call
 
 if TYPE_CHECKING:
@@ -62,28 +67,65 @@ class AnthropicAdapter(LLMAdapter):
 
         def _call() -> str:
             t0 = time.monotonic()
-            message = self._client.messages.create(
-                model=self._model,
-                max_tokens=effective_max_tokens,
-                system=system,
-                messages=[{"role": "user", "content": user}],
-                timeout=effective_timeout,
-            )
+            try:
+                message = self._client.messages.create(
+                    model=self._model,
+                    max_tokens=effective_max_tokens,
+                    system=system,
+                    messages=[{"role": "user", "content": user}],
+                    timeout=effective_timeout,
+                    # Top-level auto-caching: caches the last cacheable block (the
+                    # run-stable system prompt) so repeated Pass-2 chunk calls in a
+                    # run pay ~0.1x cache reads instead of full-price re-processing.
+                    cache_control={"type": "ephemeral"},
+                )
+            except anthropic.APIStatusError as exc:
+                if looks_like_context_exceeded(exc):
+                    log_context_overflow("anthropic", self._model, context_label, exc)
+                    record_llm_call(
+                        provider="anthropic",
+                        model=self._model,
+                        context_label=context_label,
+                        input_tokens=0,
+                        output_tokens=0,
+                        duration_s=time.monotonic() - t0,
+                        system_prompt=system,
+                        user_prompt=user,
+                        error=f"context_length_exceeded: {exc}",
+                    )
+                raise
             raw = ""
             for block in message.content:
                 if hasattr(block, "text"):
                     raw = block.text
                     break
+            # Anthropic's stop_reason == "max_tokens" means output was truncated at
+            # the max_tokens cap — surfaced for diagnosability only (see Invariant 13:
+            # window/max_tokens sizing should prevent this in normal operation).
+            finish_reason = "max_tokens" if message.stop_reason == "max_tokens" else None
+            if finish_reason is not None:
+                log_truncated_output("anthropic", self._model, context_label, finish_reason)
+            # usage is present on every successful response, but guard against a
+            # None/missing usage so a malformed response can't turn into an
+            # AttributeError here (all four counts fall back to 0).
+            usage = getattr(message, "usage", None)
+            input_tokens = getattr(usage, "input_tokens", 0) or 0
+            output_tokens = getattr(usage, "output_tokens", 0) or 0
+            cache_read = getattr(usage, "cache_read_input_tokens", 0) or 0
+            cache_create = getattr(usage, "cache_creation_input_tokens", 0) or 0
             record_llm_call(
                 provider="anthropic",
                 model=self._model,
                 context_label=context_label,
-                input_tokens=message.usage.input_tokens,
-                output_tokens=message.usage.output_tokens,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
                 duration_s=time.monotonic() - t0,
+                cache_read_tokens=cache_read,
+                cache_creation_tokens=cache_create,
                 raw_response=raw,
                 system_prompt=system,
                 user_prompt=user,
+                finish_reason=finish_reason,
             )
             return self.strip_code_fences(raw)
 

@@ -20,6 +20,14 @@ EXHAUSTIVENESS RULES
   are separate Aircraft nodes — do not collapse them into one.
 - People named as authors, designers, or co-workers in passing are Person nodes even
   if little other information is given (use null attributes with confidence 0.0).
+- ALTER-EGO / IDENTITY LINKING: When the text establishes that two names refer to
+  the same real-world entity under different identities, roles, or eras (e.g. "Anakin
+  Skywalker became Darth Vader", a character adopts a new name, a company rebrands),
+  extract BOTH as separate nodes but emit an edge linking them. Use the edge type
+  "same_as", "alias_of", or "became" — whichever the schema provides. If no such
+  edge type exists in the schema, use the closest available relationship (e.g.
+  "related_to", "referenced_by") and note the identity link in the edge attributes.
+  Never leave alter-ego pairs as disconnected duplicates.
 
 EDGE COMPLETENESS
 =================
@@ -91,6 +99,25 @@ WRONG (positional array):
     {"value": "Flying Discs", "confidence": 0.95},
     {"value": "Flying Discs", "confidence": 0.90}
   ]
+
+GROUNDING — NO HALLUCINATION
+=============================
+Extract ONLY what the source text explicitly states or directly implies. Every node
+name, attribute value, and relationship must be traceable to specific words in the
+input. Do NOT fill in details from your training data or world knowledge.
+
+Common violations:
+- Naming an entity with a canonical name the text never uses (e.g. the text describes
+  "the battle at the Death Star" but never says "Yavin" — do NOT output "Battle of
+  Yavin"). Use the name or description the text actually provides.
+- Adding attribute values the text does not state (e.g. inferring a birth year from
+  your knowledge of a real person). Use null with confidence 0.0 instead.
+- Inventing relationships not described in the text (e.g. connecting two people because
+  you know they are related in real life, but the text does not mention it).
+
+If the text provides only a description and no proper name for an entity, use a
+descriptive name derived from the text itself (e.g. "Death Star Assault" not
+"Battle of Yavin").
 
 RULES
 =====

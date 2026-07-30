@@ -44,6 +44,11 @@ def setup(log_file: Path | None = None, verbose: bool = False) -> None:
 
     from mykg import config
 
+    if sys.platform == "win32":
+        for _stream in (sys.stdout, sys.stderr):
+            if hasattr(_stream, "reconfigure"):
+                _stream.reconfigure(encoding="utf-8", errors="backslashreplace")
+
     level = logging.DEBUG if verbose else logging.INFO
     root = logging.getLogger()
     root.setLevel(level)
@@ -127,6 +132,7 @@ def record_llm_call(
     user_prompt: str | None = None,
     status_code: int | None = None,
     error: str | None = None,
+    finish_reason: str | None = None,
 ) -> None:
     """Append one JSON line to llm.log. No-op if llm.log is not configured."""
     if _llm_handler is None:
@@ -161,6 +167,8 @@ def record_llm_call(
         entry["status_code"] = status_code
     if error is not None:
         entry["error"] = error
+    if finish_reason is not None:
+        entry["finish_reason"] = finish_reason
     line = json.dumps(entry) + "\n"
     record = logging.makeLogRecord({"msg": line, "levelno": logging.INFO})
     with _llm_log_lock:

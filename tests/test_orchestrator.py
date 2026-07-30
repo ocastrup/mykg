@@ -169,6 +169,57 @@ def test_run_retries_on_failure(tmp_path):
     assert call_counts["n"] == 2
 
 
+def test_run_does_not_retry_click_exception(tmp_path):
+    """A click.ClickException (precondition/usage error) fails immediately —
+    no second attempt, since retrying cannot fix a missing-precondition error."""
+    import click
+
+    call_counts = {"n": 0}
+    ctx = _make_ctx(tmp_path)
+    ctx.intermediate_dir.mkdir(parents=True, exist_ok=True)
+
+    def bad_precondition(c):
+        call_counts["n"] += 1
+        raise click.ClickException("no batch proposals found")
+
+    steps = [Step(name="bad", fn=bad_precondition, outputs=["x.json"], blocking=True)]
+    with pytest.raises(PipelineHaltError) as exc_info:
+        run(steps, ctx)
+    assert call_counts["n"] == 1
+    assert "no batch proposals found" in str(exc_info.value)
+
+
+def test_run_skips_feedback_on_click_exception(tmp_path, monkeypatch):
+    """A click.ClickException on an is_llm_step=True step must not invoke
+    feedback.apply — the error is a usage/precondition failure, not
+    LLM-fixable schema content, and asking the LLM to "correct" it wastes
+    time or can produce a nonsensical schema edit."""
+    import click
+
+    import mykg.feedback as feedback
+
+    feedback_called = {"called": False}
+
+    def fake_apply(step_name, error, ctx):
+        feedback_called["called"] = True
+        return False
+
+    monkeypatch.setattr(feedback, "apply", fake_apply)
+
+    ctx = _make_ctx(tmp_path)
+    ctx.intermediate_dir.mkdir(parents=True, exist_ok=True)
+
+    def bad_precondition(c):
+        raise click.ClickException("no batch proposals found")
+
+    steps = [
+        Step(name="pass1", fn=bad_precondition, outputs=["x.json"], is_llm_step=True, blocking=True)
+    ]
+    with pytest.raises(PipelineHaltError):
+        run(steps, ctx)
+    assert feedback_called["called"] is False
+
+
 def test_run_halts_on_blocking_failure(tmp_path):
     ctx = _make_ctx(tmp_path)
     ctx.intermediate_dir.mkdir(parents=True, exist_ok=True)
@@ -672,3 +723,76 @@ def test_append_mode_skips_pass1(tmp_path):
     run(steps, ctx)
     assert "pass1" not in executed
     assert "ingest" in executed
+
+
+def test_stop_after_halts_pipeline_at_named_step(tmp_path):
+    """stop_after halts the run right after that step completes; later steps
+    never execute (--pass1-schema-induction-only)."""
+    executed = []
+    ctx = _make_ctx(tmp_path)
+    ctx.intermediate_dir.mkdir(parents=True, exist_ok=True)
+    ctx.stop_after = "schema_flatten"
+
+    def make_step(name, out):
+        def fn(c):
+            executed.append(name)
+            (c.intermediate_dir / out).write_text("{}")
+
+        return Step(name=name, fn=fn, outputs=[out])
+
+    steps = [
+        make_step("pass1", "schema.json"),
+        make_step("schema_flatten", "flattened_schema.json"),
+        make_step("pass2", "raw_extractions.json"),
+    ]
+    run(steps, ctx)
+    assert executed == ["pass1", "schema_flatten"]
+    assert "pass2" not in executed
+
+
+def test_pass2_only_skips_schema_induction_steps(tmp_path):
+    """pass2_only skips pass1/schema_validate/human_review but still runs
+    preprocess/ingest/schema_flatten/pass2/downstream over the full corpus."""
+    ctx = _make_ctx(tmp_path)
+    ctx.intermediate_dir.mkdir(parents=True, exist_ok=True)
+    ctx.output_dir.mkdir(parents=True, exist_ok=True)
+    ctx.pass2_only = True
+    (ctx.intermediate_dir / "schema.json").write_text("{}")
+
+    executed = []
+
+    def make_step(name, out):
+        def fn(c):
+            executed.append(name)
+            (c.intermediate_dir / out).write_text("{}")
+
+        return Step(name=name, fn=fn, outputs=[out])
+
+    steps = [
+        make_step("preprocess", "preprocess.done"),
+        make_step("ingest", "file_manifest.json"),
+        make_step("pass1", "schema2.json"),
+        make_step("schema_validate", "schema_validate.done"),
+        make_step("human_review", "schema_approved.flag"),
+        make_step("schema_flatten", "flattened_schema.json"),
+        make_step("pass2", "raw_extractions.json"),
+    ]
+    run(steps, ctx)
+
+    assert "preprocess" in executed
+    assert "ingest" in executed
+    assert "pass1" not in executed
+    assert "schema_validate" not in executed
+    assert "human_review" not in executed
+    assert "schema_flatten" in executed
+    assert "pass2" in executed
+
+
+def test_pass2_only_requires_existing_schema(tmp_path):
+    """pass2_only=True without a prior schema.json raises RuntimeError."""
+    ctx = _make_ctx(tmp_path)
+    ctx.intermediate_dir.mkdir(parents=True)
+    ctx.pass2_only = True
+
+    with pytest.raises(RuntimeError, match="No existing schema found"):
+        run([], ctx)

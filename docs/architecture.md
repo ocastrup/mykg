@@ -10,6 +10,7 @@ This document explains how **myKG** works at a conceptual level: the pipelines, 
 - [Orchestrator](#orchestrator)
 - [Extract Pipeline Steps](#extract-pipeline-steps)
 - [Merge Pipeline Steps](#merge-pipeline-steps)
+- [Website and Repo Fetching (`mykg fetch-web`)](#website-and-repo-fetching-mykg-fetch-web)
 - [Extract Pipeline](#extract-pipeline)
   - [Pass 1: Schema Induction](#pass-1-schema-induction)
   - [Pass 2: Instance Extraction](#pass-2-instance-extraction)
@@ -18,6 +19,8 @@ This document explains how **myKG** works at a conceptual level: the pipelines, 
   - [Name Normalization](#name-normalization)
 - [Merge Pipeline](#merge-pipeline)
 - [Output Formats](#output-formats)
+- [MCP Server (`mykg mcp-serve`)](#mcp-server-mykg-mcp-serve)
+- [Skill vs MCP — Capability Comparison](#skill-vs-mcp--capability-comparison)
 - [Resumability and Re-entry](#resumability-and-re-entry)
 - [Re-entry Points](#re-entry-points)
 - [Correction Model](#correction-model)
@@ -34,6 +37,8 @@ This document explains how **myKG** works at a conceptual level: the pipelines, 
 |---|---|
 | `mykg extract-graph <dir>` | Reads Markdown files, induces a schema, extracts entities and relationships, and exports the graph |
 | `mykg merge-graphs <A> <B>` | Combines two independently-produced sessions into one unified knowledge graph |
+| `mykg fetch-web <url>` | Crawls a website (or shallow-clones a GitHub repo) into a local folder that is a ready-made `extract-graph` input |
+| `mykg mcp-serve` | Starts an MCP server exposing a completed knowledge graph session for LLM-powered Q&A via 13 read-only tools |
 
 Both pipelines run as a sequence of named steps. All intermediate state is written to disk after every step, so any step can be re-entered without repeating upstream work.
 
@@ -43,7 +48,7 @@ The LLM layer is provider-pluggable: six adapters ship out of the box (Anthropic
   <img src="diagrams/system-overview.png" width="80%" style="vertical-align:middle;">
 </p>
 
-*Mixed input enters at the top; preprocessing routes non-Markdown files to MinerU or markdownify; Pass 1 induces a schema, Pass 2 extracts instances against it; the assembly stage deduplicates and writes the edge metadata sidecar; the orphan-connection pass reconnects isolated nodes and can escalate to a surgical Pass 2 restart when the schema is incomplete (dashed loop on the right); five output families are written from the same in-memory data.*
+*Mixed input enters at the top; preprocessing routes non-Markdown files to MinerU, markdownify, or rename (for plain text); Pass 1 induces a schema, Pass 2 extracts instances against it; the assembly stage deduplicates and writes the edge metadata sidecar; the orphan-connection pass reconnects isolated nodes and can escalate to a surgical Pass 2 restart when the schema is incomplete (dashed loop on the right); five output families are written from the same in-memory data.*
 
 ---
 
@@ -66,7 +71,7 @@ The extract pipeline (`mykg extract-graph`) runs 12 steps in sequence. Steps mar
 
 | # | Step | LLM | What it does | Key outputs |
 |---|---|---|---|---|
-| 1 | `preprocess` | — | Optional. Converts non-Markdown sources to `.md` before ingest. Routing is per file extension: PDF / DOCX / PPTX / images go to MinerU (subprocess in an ephemeral `uv` venv); HTML / HTM go to `markdownify` in-process; anything else is logged and skipped. Disabled unless `preprocess.enabled: true`. Skipped on re-entry when the sentinel exists | `preprocess.done`, `preprocess_manifest.json`, files under `input/_preprocessed/` |
+| 1 | `preprocess` | — | Optional. Converts non-Markdown sources to `.md` before ingest. Routing is per file extension: PDF / DOCX / PPTX / images go to MinerU (subprocess in an ephemeral `uv` venv); HTML / HTM go to `markdownify` in-process; TXT is renamed to `.md` in-process; anything else is logged and skipped. Disabled unless `preprocess.enabled: true`. Skipped on re-entry when the sentinel exists | `preprocess.done`, `preprocess_manifest.json`, files under `input/_preprocessed/` |
 | 2 | `ingest` | — | Reads all Markdown files (including converted output under `input/_preprocessed/`), computes content hashes, splits each file into overlapping token windows, and builds the file manifest used by all downstream steps | `file_manifest.json` |
 | 3 | `pass1` | ✓ (3 calls) | Induces a global RDFS schema from the corpus via parallel batch induction, algorithmic merge, LLM harmonization, and LLM quality review | `schema.json`, `schema.ttl`, `schema_history/` |
 | 4 | `schema_validate` | — | Validates `schema.json` with rdflib (syntax) and custom semantic checks (domain/range refer to declared classes, no conflicting ranges). On failure, sends a correction prompt to the LLM and retries once | `schema_validate.done` |
@@ -102,6 +107,126 @@ The merge pipeline (`mykg merge-graphs`) runs 12 steps. `schema_validate`, `huma
 
 ---
 
+## Website and Repo Fetching (`mykg fetch-web`)
+
+`mykg fetch-web <url>` is a standalone acquisition command — it runs before `extract-graph`, has no session concept, and makes no LLM calls. Its job is narrow: produce a local folder that `extract-graph` (and, for non-Markdown content, the `preprocess` step) can consume directly. It does acquisition and provenance only; HTML→Markdown conversion still happens in `preprocess` (see below), not here.
+
+The command branches on the shape of each seed URL:
+
+- **A bare GitHub repo URL** (`https://github.com/<owner>/<repo>`, optionally with `.git`, a trailing slash, or a `/tree/...` sub-path) → **shallow `git clone`**, no Crawlee, no venv.
+- **Anything else** → **Crawlee same-domain crawl** inside an ephemeral `uv` venv (mirrors the MinerU venv pattern — nothing about Crawlee is installed into mykg's own interpreter).
+- **`--url-list <file>`** → each line is routed independently through one of the two branches above; all Crawlee seeds in the list share **one** venv and one subprocess, running concurrently up to `fetch.max_workers`.
+
+The output directory defaults to `./<fetch.output_dir>/<seed-domain>/` (configurable; default `mykg_web_fetch`), or `github.com_<owner>_<repo>/` for a GitHub seed. `--output` overrides this and is required when `--url-list` is used (no single auto-derived directory makes sense for N seeds).
+
+### Single-seed website crawl
+
+```mermaid
+sequenceDiagram
+    actor User
+    participant CLI as mykg fetch-web
+    participant Venv as ephemeral uv venv
+    participant Crawler as _crawl_runner.py (Crawlee)
+    participant Site as target website
+    participant FS as output dir
+
+    User->>CLI: mykg fetch-web https://example.com
+    CLI->>CLI: infer_max_depth(url) (bare domain → fetch.max_depth, page → 0)
+    CLI->>FS: load_manifest() (prior fetch_manifest.json, if any)
+    CLI->>Venv: uv venv + uv pip install fetch.crawlee_spec
+    Venv-->>CLI: venv ready
+    CLI->>Crawler: spawn subprocess with build_crawl_config(...)
+    loop same-domain crawl (bounded by max_pages / max_depth)
+        Crawler->>Site: GET page (respects robots.txt, request_delay_seconds)
+        Site-->>Crawler: HTML / asset bytes
+        Crawler->>Crawler: local_path_for_url() + is_already_fetched() (resume/dedup by sha256)
+        Crawler->>FS: write page/asset under output dir
+    end
+    Crawler-->>CLI: per-page results (url, sha256, content_type, status)
+    CLI->>Venv: tear down venv (TemporaryDirectory cleanup)
+    CLI->>FS: write_manifest() → fetch_manifest.json
+    CLI-->>User: "Next: mykg extract-graph <output dir>"
+```
+
+### GitHub repo seed
+
+```mermaid
+sequenceDiagram
+    actor User
+    participant CLI as mykg fetch-web
+    participant Git as git CLI
+    participant FS as output dir
+
+    User->>CLI: mykg fetch-web https://github.com/owner/repo
+    CLI->>CLI: is_github_repo_url(url) → (owner, repo)
+    Note over CLI: fetch.github_clone_enabled (default true) — Crawlee/venv skipped entirely
+    CLI->>Git: git clone --depth fetch.github_clone_depth <repo> <output>/_repo/
+    Git-->>FS: working tree + .git/ (kept for provenance)
+    CLI->>CLI: filter_repo_files(): walk _repo/ (skip .git/), copy .md + preprocess.extensions
+    CLI->>FS: write filtered files to <output>/input/
+    CLI->>FS: write_manifest(strategy="github_clone", pages={}, stats={files_total, files_copied, files_skipped})
+    CLI-->>User: "Next: mykg extract-graph <output>/input/"
+```
+
+### `--url-list` multi-seed fetch
+
+```mermaid
+sequenceDiagram
+    actor User
+    participant CLI as mykg fetch-web
+    participant Venv as ephemeral uv venv (shared)
+    participant Crawler as _crawl_runner.py
+    participant Git as git CLI
+
+    User->>CLI: mykg fetch-web --url-list urls.txt --output ./mykg_web_fetch/batch
+    CLI->>CLI: parse_url_list() (one URL per line, # comments ignored)
+    loop for each seed URL
+        alt seed is a GitHub repo URL
+            CLI->>Git: clone_github_repo() + filter_repo_files() → <output>/<seed>/{_repo,input}/
+        else seed is a website
+            CLI->>CLI: queue seed_cfg via build_crawl_config() (own max_pages/max_depth — no shared budget)
+        end
+    end
+    CLI->>Venv: uv venv + uv pip install (once, only if any Crawlee seeds queued)
+    Venv->>Crawler: spawn subprocess with seeds list and fetch.max_workers
+    par bounded by asyncio.Semaphore(max_workers)
+        Crawler->>Crawler: crawl(seed_cfg) for each website seed, concurrently
+    end
+    Crawler-->>CLI: seeds results (index-aligned with input seeds)
+    CLI->>Venv: tear down venv
+    CLI->>CLI: write top-level fetch_manifest.json (seed_url/strategy=null, seeds list with per-seed output_subdir/stats, pages/stats = union/sum)
+    CLI-->>User: per-seed output dirs, each a ready extract-graph input
+```
+
+### Resume and provenance
+
+Every page written carries its SHA-256 in `fetch_manifest.json["pages"]`. On a subsequent run against the same output directory, `load_manifest()` + `is_already_fetched()` skip re-downloading any URL whose content hash is unchanged — `--force` bypasses this and re-fetches everything. `fetch_manifest.json` is the only place URL provenance is recorded; the graph's `source_files` join back to the original URL via this manifest, but the URL itself is not threaded into nodes or edges.
+
+Guardrails are config-driven (`fetch.*` in `mykg_config.yaml`, Invariant 7): `respect_robots`, `max_pages`, `max_depth`, `request_delay_seconds` + `concurrency` for rate limiting, and `download_assets` gated by the same `preprocess.extensions` allowlist used by the preprocess step — so an asset Crawlee downloads is guaranteed to be a type `preprocess` already knows how to convert.
+
+### Chaining into `extract-graph`
+
+`fetch-web`'s output folder is consumed exactly like any other input directory:
+
+```bash
+mykg fetch-web https://example.com
+mykg extract-graph ./mykg_web_fetch/example.com/
+```
+
+For HTML pages, the `preprocess` step's `markdownify` branch (below) converts them to Markdown in-process during `extract-graph` — `fetch-web` never converts anything itself.
+
+### `/mykg` skill support
+
+The Claude Code skill (`src/mykg/data/skills/mykg/SKILL.md`) treats `fetch-web` as a **no-session** subcommand, the same category as `parse-docs`: it dispatches directly with no confirmation for the fetch itself. The skill maps free-form intent to the three branches above without the user needing to know any flags:
+
+- `/mykg fetch <url>` → `mykg fetch-web <url>`, defaulting `--output` to `./<fetch.output_dir>/<seed-domain>/` when the user doesn't name one.
+- `/mykg download the github repo <owner>/<repo>` → `mykg fetch-web https://github.com/<owner>/<repo>` — the CLI's own `is_github_repo_url()` detects the shape; the skill does no special-casing.
+- `/mykg fetch these urls: <url1> <url2> ...` (URLs typed inline, not a file path) → the skill writes each URL on its own line to a temp file (`mykg_urls.txt`) and calls `mykg fetch-web --url-list mykg_urls.txt --output <dir>`, since `--url-list` requires a file.
+
+For the chained **"fetch and extract"** intents, the skill runs the fetch first (unconditionally), then confirms once before the LLM-bearing step: for a single seed it proposes `mykg extract-graph <output dir>` (fresh session); for `--url-list` it lists every per-seed output subdir from `fetch_manifest.json["seeds"]` and proposes one fresh-session `extract-graph` run per subdir, letting the user approve all, none, or a subset.
+
+---
+
 ## Extract Pipeline
 
 The extract pipeline runs 12 steps. Step 1 (preprocess) is optional and runs only if non-Markdown sources are present and the config enables it; steps 2–3 are the core LLM passes; the rest handle normalization, assembly, quality improvement, and export.
@@ -112,13 +237,61 @@ The fundamental separation is between **schema induction** — asking "what kind
 
 The preprocess step converts non-Markdown sources to Markdown so the rest of the pipeline only sees `.md`. It is opt-in via `preprocess.enabled: true` and a no-op when the input directory is pure Markdown.
 
-Discovery walks the session's `input/` tree and matches each non-`.md` file against a **single** flat allowlist in `mykg_config.yaml` — `preprocess.extensions` (default `.pdf .docx .doc .pptx .png .jpg .jpeg .html .htm`). For each suffix in the allowlist, the backend is chosen internally by a hardcoded mapping:
+Discovery walks the session's `input/` tree and matches each non-`.md` file against a **single** flat allowlist in `mykg_config.yaml` — `preprocess.extensions` (default `.pdf .docx .doc .pptx .png .jpg .jpeg .html .htm .txt`). For each suffix in the allowlist, the backend is chosen internally by a hardcoded mapping:
 
+- **Plain text** (`.txt`) → **renamed to `.md`**, in-process. The file content is already plain text, so no conversion is needed — it is copied with a `.md` extension. Subdirectory structure is preserved relative to the input dir.
 - **HTML** (`.html`, `.htm`) → **markdownify**, in-process. `markdownify(html, strip=["img", "a"])` is called per file — anchors and image tags are stripped because their `href`/`src` paths would not resolve outside the original page. Subdirectory structure is preserved relative to the input dir.
 - **Everything else in the allowlist** (PDF, DOCX, PPTX, images) → **MinerU**, invoked via a single `mykg parse-docs` subprocess. The subprocess builds one ephemeral Python 3.12 virtualenv via `uv`, installs `mineru[all]` into it, and loops MinerU per file inside that venv — one model load per file, but one install cost per run. The venv is deleted on exit. Nothing about MinerU is installed into mykg's own interpreter, which keeps mykg compatible with Python 3.11+ even though MinerU pins 3.12.
 - **Suffix not in the allowlist** is logged at INFO and recorded under `preprocess_manifest.json["skipped_files"]` as `{path, ext}` records. The file is left untouched on disk and never reaches `ingest`. This is the right behaviour for sidecar assets that accompany HTML pages (e.g. `.php`, `.svg`, `.css` files in a saved Wikipedia bundle) — neither dropped silently nor force-converted.
 
 The split between *one user-facing allowlist* and *an internal backend map* is deliberate: which tool can handle which format is a property of the format (MinerU does not natively accept HTML), so it's not user-configurable; whether to convert that format at all is a user choice, so it's a single line in YAML.
+
+```mermaid
+sequenceDiagram
+    actor Orchestrator
+    participant Step as step_preprocess
+    participant FS as input/ tree
+    participant Venv as ephemeral uv venv
+    participant MinerU as mykg parse-docs (MinerU)
+    participant MD as markdownify (in-process)
+
+    Orchestrator->>Step: run_preprocess(ctx)
+    Step->>FS: discover non-.md files, filter by preprocess.extensions
+    Note over Step: unmatched suffixes -> skipped_files (untouched on disk)
+    Step->>FS: stream-hash each candidate (sha256)
+    Step->>Step: load_prior_manifest() -> preprocess_manifest.json["source_files"]
+    loop for each candidate
+        alt sha256 matches prior entry and output_md exists
+            Step->>Step: reuse prior output_md, no conversion
+        else new, modified, or output missing
+            alt suffix is .txt
+                Step->>FS: rename to input/_preprocessed/<rel>/<stem>.md
+            else suffix is .html / .htm
+                Step->>MD: markdownify(html, strip=[img, a])
+                MD->>FS: write input/_preprocessed/<rel>/<stem>.md
+            else PDF / DOCX / PPTX / image
+                Step->>Step: add <rel> to preprocess_filelist.txt
+            end
+        end
+    end
+    opt at least one MinerU candidate queued
+        Step->>Venv: uv venv + uv pip install mineru[all] (once)
+        Step->>MinerU: parse-docs --file-list preprocess_filelist.txt
+        loop per file in list
+            MinerU->>MinerU: convert to <stem>/<backend>/<stem>.md + images/ + <stem>.mineru.json
+        end
+        MinerU-->>Step: per-file canonical .md locations
+        Step->>FS: _discover_canonical_md() (deepest <stem>.md match)
+        alt preprocess.keep_artifacts == false (default)
+            Step->>FS: flatten to input/_preprocessed/<rel>/<stem>.md, rmtree rest
+        else keep_artifacts == true
+            Note over Step: full MinerU layout retained for debugging
+        end
+        Step->>Venv: tear down venv
+    end
+    Step->>FS: write preprocess_manifest.json + preprocess.done (atomic)
+    Step-->>Orchestrator: done (ingest reads input/_preprocessed/ via rglob)
+```
 
 **Change detection.** Between runs, `step_preprocess` stream-hashes every non-`.md` source file and compares against `preprocess_manifest.json["source_files"]`. Files whose source SHA matches a prior entry (and whose converted `.md` still exists on disk) are skipped — MinerU is not re-invoked. The list of changed files is handed to `parse-docs` via `--file-list <intermediate/preprocess_filelist.txt>`, so argv stays O(1) in corpus size and re-running `extract-graph` after adding a single PDF only re-converts that PDF. Forcing a full re-conversion is `extract-graph --from-step preprocess`, which deletes the manifest and the converted output before running.
 
@@ -134,15 +307,29 @@ It runs four sequential stages:
 
 **Parallel batch induction.** Documents are split into overlapping windows. All windows are dispatched concurrently to the LLM, each batch producing a schema proposal: a set of concept types (like Person, Organization, Project) and relationship types (like works_at, depends_on). Batching is parallelised to minimise wall-clock time on large corpora.
 
+On large corpora, thousands of batches can be produced. The pipeline caps batch dispatch at `pass1.max_schema_proposals` (default 50) — batches are sampled down to that count before the `ThreadPoolExecutor` runs, using a fresh `random.Random(pass1.random_seed)` instance constructed per call (default seed 0). This is deliberately **not** a module-level shared RNG: a shared instance would advance its internal state across repeated `run_pass1()` calls in the same process (e.g. `--append-with-grow-schema`'s second, locked Pass 1 call over only the changed files) and silently produce a different sample the second time despite the same seed — a per-call instance is reproducible regardless of how many times Pass 1 has already run. A warning is logged when the cap fires. Set `pass1.max_schema_proposals: -1` to disable the cap and dispatch all batches.
+
+Before any LLM call is made, the exact batch selection — seed, total vs. sampled batch count, and each batch's chunk count/source files/token total — is written to `intermediate/pass1_batch_selection.json`, unconditionally (even when no sampling occurred). This is both an audit record and the mechanism that makes resumability safe: a later Pass 1 run only reuses a persisted batch result if the current batch composition matches this file exactly, not merely by index.
+
+As each batch's LLM call resolves — success or failure — its result is written immediately to `intermediate/pass1_batch_proposals/<index>.json`, rather than only being assembled in memory until the whole dispatch loop finishes. A crash mid-dispatch therefore only loses the batches still in flight: re-running (without `--from-step`) skips every batch whose shard already matches the current selection and only re-dispatches the rest — the same incremental-resume pattern Pass 2's `batch_chunks` prep mode uses for its per-file shards.
+
 **Algorithmic merge.** All batch proposals are merged without another LLM call. Exact duplicates are collapsed first, then near-duplicates are resolved using string normalization and, if you supplied a SKOS thesaurus, vocabulary-aware synonym matching. Attributes from duplicate entries are unioned. If you supplied a locked base schema, those classes and properties are protected — the LLM cannot rename, remove, or restructure them.
 
-**Harmonization.** A single LLM call sees both the merged schema and the raw batch proposals. It collapses semantic near-duplicates the algorithmic step missed — for example, collapsing "MilitaryUnit" and "ArmyUnit" into one canonical type. The original is kept if the response is unparseable.
+**Harmonization.** A single LLM call sees both the merged schema and the raw batch proposals. It collapses semantic near-duplicates the algorithmic step missed — for example, collapsing "MilitaryUnit" and "ArmyUnit" into one canonical type. The original is kept if the response is unparseable. The same call is used in the merge pipeline via `harmonize_schema_for_merge`.
 
 **Quality review.** A second LLM call removes over-narrow named-entity singletons (a concept like "FourthAirForce" should be an instance of MilitaryUnit, not a concept type), fixes singleton types with no meaningful abstraction, and ensures every concept has at least a name attribute.
 
 The result is written to `intermediate/schema.json` and `intermediate/schema.ttl`. If you run with `--review`, the pipeline pauses here so you can inspect and edit the schema in Protégé or a text editor before any entity is extracted.
 
 Every schema write is also recorded as a numbered delta file in `intermediate/schema_history/` so you can reconstruct how the schema evolved across the run.
+
+**Stopping after schema induction (`--pass1-schema-induction-only`).** Rather than pausing for review and resuming in the same invocation (`--review`), this flag runs every step before Pass 2 — `preprocess → ingest → pass1 → schema_validate → human_review (if --review) → schema_flatten` — and then halts the process entirely. It's the right tool when you want to induce and inspect a schema as a fully separate step from committing to extraction: review `schema.json` at leisure, hand-edit it, or simply confirm it looks right before paying for Pass 2's LLM cost across the whole corpus. `schema_flatten` is included in the run — it's the literal last step before `pass2`, not an optional extra — so `flattened_schema.json` is ready immediately. A `walkthrough.md` report is still written for the truncated run; the walkthrough generator already tolerates partial session state (it's what makes the `--review` wait-state path produce a report too).
+
+The complementary flag, **`--pass2-kg-extraction-only`**, picks up where this leaves off: it skips schema induction entirely (requiring a `schema.json` already on disk) and runs `schema_flatten → pass2 → normalize_names → assemble → orphan_score → orphan_connect → validate_graph` over the whole corpus — not just changed files, unlike `--append`. `schema_flatten` re-runs regardless (cheap, no LLM), so a schema you hand-edited between the two invocations is picked up rather than silently overridden by a stale `flattened_schema.json`.
+
+**Not the same as `--from-step pass2`.** `--from-step pass2` is a re-entry point: it deletes `pass2`'s outputs and downstream, then runs `pass2 → validate_graph`, trusting whatever `flattened_schema.json` already exists — it never touches `schema_flatten`. `--pass2-kg-extraction-only` runs the same downstream steps but always re-derives `flattened_schema.json` first. On an unchanged schema the two are equivalent; they diverge only if the schema was hand-edited since the last run. The two compose: `--from-step pass2 --pass2-kg-extraction-only` redoes Pass 2 cleanly while also guaranteeing a fresh `flattened_schema.json`.
+
+**Skipping straight to merge (`--from-step merge_proposals`).** If `intermediate/pass1_batch_proposals/` already holds one or more successful shards — from a completed or partially-completed prior run — `mykg extract-graph <dir> --session <name> --from-step merge_proposals` skips batch induction's LLM dispatch entirely and jumps straight into algorithmic merge → harmonization → quality review, reusing the persisted proposals as-is. This is useful for re-running merge with a different `--thesaurus` or `--base-schema`, or after tuning merge logic, without re-paying for schema-induction LLM calls. Unlike plain `--from-step pass1` — which deletes `pass1_batch_selection.json` and `pass1_batch_proposals/` for a guaranteed clean, fully re-dispatched slate — `--from-step merge_proposals` explicitly preserves both files, since reusing them is its entire purpose.
 
 ### Pass 2: Instance Extraction
 
@@ -154,9 +341,78 @@ Pass 2 runs against the induced schema. For each document, it extracts the speci
 
 After each LLM call, the pipeline validates the response: edges whose type is not in the schema are rejected, as are edges that reference node IDs not present in the same extraction. Any node that exists solely to anchor a rejected edge is also dropped. Missing attributes are backfilled with a null value and zero confidence — they are never silently omitted.
 
+<p align="center">
+  <img src="diagrams/mykg_batching_and_chunking.png" width="90%" style="vertical-align:middle;">
+</p>
+
+*Pass 1 batches all chunks into token-bounded batches regardless of file boundaries. Pass 2 offers three prep modes — `per_file` keeps each source file as its own extraction unit, `concat` bin-packs whole files into virtual concatenations, and `batch_chunks` pools all chunks across the corpus into evenly-sized batches.*
+
+**Prep modes (`pass2.prep_mode`).** How files are packed into LLM calls is selectable; all three modes write per-file shards keyed by **real source filename**, so resumability and `--append` change-detection work identically across modes:
+
+- **`per_file`** — one LLM call per file. Most calls; simplest.
+- **`batch_chunks`** (default) — every file is chunked, chunks are pooled and packed into token-bounded batches (one LLM call per batch). A large file's chunks may span batches. `batch_per_file: true` forbids mixing files in a batch.
+- **`concat`** — bin-packs **whole files** (grouped by directory, prefix-sorted, never split at the packing stage) into virtual concatenations, joined with `--- SOURCE: path ---` delimiters so related files reach the LLM together. The concatenation is then re-chunked at `window_tokens` and sent one LLM call per window — the same call pattern concat has always had.
+
+#### Choosing a prep mode
+
+| | **per_file** | **concat** | **batch_chunks** (default) |
+|---|---|---|---|
+| **Unit of work** | One file = one batch | Small files merged into virtual batches up to `concat_batch_token_target` | All chunks packed into batches by `batch_token_target`, ignoring file boundaries |
+| **Cross-file mixing** | Never | Only among small files that fit in one virtual batch | Any chunk can share a batch with any other (`batch_per_file: true` to forbid) |
+| **Stateful chunks** | Yes, within each file | Yes, within each virtual batch | No (each batch starts fresh) |
+| **Parallelism** | Up to `max_workers` files at once, but large files are serial bottlenecks | Limited by virtual batch count | All batches independent; workers stay busy |
+| **Provenance** | Exact: every entity traces to one source file | Exact across virtual-batch members | Approximate: an entity inherits all source files in its batch (assembler dedup collapses the overlap; no confidence inflation) |
+| **Controlled by** | File count and sizes | `concat_batch_token_target` | `batch_token_target` |
+| **Best for** | Self-contained documents, audit/citation needs | Many small files, moderate cross-file context | Maximum throughput and extraction density |
+
+**`per_file`** keeps each source file as its own extraction unit. Each file's chunks are processed sequentially (with `stateful_chunks` on, the output of chunk N is fed as context to chunk N+1 to keep entity IDs stable). Different files run in parallel up to `max_workers`. This is the most conservative mode: provenance is clean (every entity traces to exactly one source file), and the LLM never sees text from unrelated documents in the same call. The downside is parallelism — if one file has 10 chunks and the rest have 1 each, the workers finish the small files quickly, then sit idle while the one large file grinds through chunk by chunk. The large file is a serial bottleneck regardless of `max_workers`.
+
+**`concat`** merges small files into virtual batches up to `concat_batch_token_target`. Files below the target are concatenated together; a file that exceeds it stays its own batch. This cuts the number of LLM calls when you have many tiny files that would otherwise waste per-call overhead, and gives the model moderate cross-file context (related files, grouped by directory, in one prompt). Within each virtual batch, chunks still process sequentially when `stateful_chunks` is on. Because shards are real-file-keyed (post the de-virtualization fix), `--append` re-extracts only new/changed files like the other modes — the virtual batching is recomputed per run but unchanged files are skipped via their real-keyed shards.
+
+**`batch_chunks`** (the default) chunks every file first, then packs all chunks across the corpus into token-bounded batches sized to `batch_token_target`, ignoring file boundaries. Every batch is an independent LLM call, so workers stay saturated and a single large file never bottlenecks the run — its chunks simply distribute across batches alongside everyone else's. It also gives the densest extraction (the model sees a full token budget of material per call) and per-file incremental `--append` (only changed files re-extract). The trade-off is provenance: a mixed batch's result is attributed to every member file, so a node's `source_files` may over-list — the assembler's stable-ID/edge-hash dedup collapses the duplication at assembly time, but per-file citation is less precise than `per_file` or `concat`. Set `batch_per_file: true` to keep a file's chunks from sharing a batch with other files when precise provenance matters.
+
+As a rough sense of the call-count difference: a small test corpus of five files yields **5 calls** under `per_file`, **2 virtual batches** under `concat`, and **11 batches** under `batch_chunks` (more, smaller, evenly-sized calls that keep all workers busy).
+
+Concat keyed its shards by **virtual** names (`concat_batch_NNNN.md`), which made `--append` silently drop newly-added files (regenerated virtual names collided with prior-run shard names) and could leak orphan shards. The fix changes **only shard keying**: the virtual-batch result is fanned out to one **real-file-keyed** shard per member file, so resumability and `--append` change-detection work identically across all three modes. The execution path (whole-file packing → window-sized calls) is unchanged. When a batch mixes files, the single result is attributed to every member file and the assembler's node/edge dedup collapses the duplication (no confidence inflation). A one-time auto-migration clears any legacy `concat_batch_*` shards on the first run after upgrade.
+
 **Stateful chunks.** When stateful chunk mode is enabled, each chunk receives the node IDs extracted from the previous chunk in the same file. This lets the LLM use stable, consistent IDs across chunk boundaries within a document.
 
 **Per-file shards.** When a file finishes, its results are written immediately to a per-file shard on disk. On restart, files with existing shards are skipped. Only unfinished files are re-extracted.
+
+### Incremental Schema Growth (`--append-with-grow-schema`)
+
+Plain `--append` re-runs only on new or modified files against the existing, frozen schema — Pass 1 is skipped, so the schema can never grow. `--append-with-grow-schema` lifts that restriction at bounded cost (it implies `--append`).
+
+When `--append-with-grow-schema` is set, the session's existing `intermediate/schema.ttl` is auto-loaded as a **locked base schema** (the same lock mechanism used by `--base-schema`): the LLM may ADD new concepts and properties but cannot rename, remove, or restructure the existing ones. Passing `--base-schema` alongside `--append-with-grow-schema` is an error — the base is auto-derived from the session.
+
+The flow has three parts:
+
+1. **Changed-files-only locked Pass 1.** Pass 1 is re-run, but only over the new/modified files, with the existing vocabulary injected as a locked block. The merge step unions any genuinely new concepts/properties into the locked schema.
+
+2. **Changed-file extraction.** Pass 2 extracts the new/modified files against the now-grown schema, exactly as plain `--append` does.
+
+3. **Schema-delta surgical back-fill.** When — and only when — the locked Pass 1 actually grew the schema, the already-extracted OLD files are stale: they were extracted before the new types existed. The back-fill selector decides which OLD chunks are worth re-extracting, using only `chunk_node_index.json` (no source text is re-read). A new property `D → R` targets old chunks that already contain a node of type `D` or `R`; a new concept targets old chunks containing nodes of its parent or sibling type (a root concept with no parent/siblings yields no targets). Candidates are ranked by co-occurrence count and capped per type by `pipeline.append.grow_schema_backfill_top_k_chunks_per_type` (default 10; `0` disables back-fill). Only those chunks are re-extracted surgically; all other shards are reused.
+
+This keeps the graph consistent — instances of a newly-added type appear in BOTH the new and the old documents — while staying sub-linear in corpus size (Invariant 16). The selector is a heuristic: false negatives are backstopped by the orphan pass and future runs, and a false positive costs only one no-op LLM call, bounded by the top-K cap. All exported formats are kept in sync by the same export-time validation as a fresh run (Invariant 14).
+
+### Mode Comparison
+
+| | Fresh extract | `--base-schema` | `--append` | `--append-with-grow-schema` | Orphan schema-gap restart |
+|---|---|---|---|---|---|
+| **Pass 1** | All files | All files, locked base injected | Skipped | Changed files only, locked | Skipped (schema already updated) |
+| **Schema** | Induced from scratch | Induced + locked entries preserved | Frozen (reused from prior run) | Grown: locked entries preserved, LLM may add new | Grown: new properties added by orphan pass |
+| **Pass 2** | All files | All files | New/modified files only | New/modified + surgical back-fill of old chunks | Surgical re-extraction of affected chunks only |
+| **Requires existing session** | No | No | Yes | Yes | Automatic (mid-run) |
+| **LLM cost** | O(all files) | O(all files) | O(new files) | O(new files) + bounded back-fill | O(affected chunks) |
+| **Schema source** | LLM proposals | LLM proposals + user TTL | `schema.json` (unchanged) | Session `schema.ttl` auto-loaded as locked base | `orphan_connect` LLM proposal |
+| **Can add concepts** | Yes | Yes (around locked) | No | Yes (around locked) | No |
+| **Can add properties** | Yes | Yes (around locked) | No | Yes (around locked) | Yes |
+| **Can add instances** | Yes | Yes | Yes (new files only) | Yes (new + back-filled old) | Yes (affected chunks) |
+| **Can rename/remove existing** | N/A | No (locked) | N/A (frozen) | No (locked) | No |
+| **Back-fill old files** | N/A | N/A | No | Yes, surgically | Yes, surgically |
+| **`--base-schema` compatible** | Yes | N/A | Yes | No (auto-loads session schema) | Yes |
+| **`--from-step` compatible** | Yes | Yes | Not in same command | Not in same command | N/A (automatic) |
+| **Empty delta behavior** | N/A | N/A | N/A | Collapses to plain `--append` | No restart if no new properties |
 
 ### Assembly and Deduplication
 
@@ -195,6 +451,8 @@ Orphans that cannot be connected — because no source chunk can be found, or be
 Before assembly, the pipeline runs a name normalization step. It sends all extracted names per concept type to the LLM and asks it to group surface-form variants of the same entity — for example, recognizing that "Acme Corp", "ACME", and "Acme Corporation" all refer to the same organization.
 
 The LLM returns an alias-to-canonical mapping. At assembly time, this mapping is inverted and the aliases are attached to each node. In the JSONL output, aliases appear as a flat sorted list. In the Turtle output, each alias is emitted as a `skos:altLabel` triple.
+
+On large corpora, the total number of names across all concept types can easily exceed any provider's context window. The pipeline handles this by bin-packing names into token-bounded batches (sized by `normalize_names.batch_token_target`, default 32,000 tokens) and making one LLM call per batch rather than one call for the whole corpus. Batches are split per concept type: names of the same type are never split across batches, so the LLM always sees a coherent group. A per-type safety cap (`normalize_names.max_names_per_type`, default 50,000) prevents a single runaway type from consuming the entire budget. All batch results are merged into a single `name_normalization.json` file before assembly.
 
 ---
 
@@ -268,6 +526,98 @@ Each entity note is structured as:
 - **Source files section** — Markdown files from which the entity was extracted
 
 Enabled by default via `pipeline.export.obsidian_enabled: true` in `mykg_config.yaml`. The output directory name is configurable via `pipeline.export.obsidian_vault_dir`.
+
+---
+
+## MCP Server (`mykg mcp-serve`)
+
+`mykg mcp-serve` starts a local MCP (Model Context Protocol) server that exposes a completed knowledge graph session for LLM-powered Q&A. Any MCP-compatible client — Claude Desktop, Cherry Studio, MCP Inspector, or a custom agent — can connect and query the graph using 13 read-only tools.
+
+### Architecture
+
+The server loads three files from a session via `load_session()` (`src/mykg/exporters/neo4j/_common.py`):
+- `output/nodes.jsonl` — deduplicated entities with confidence-scored attributes
+- `output/edges.jsonl` — typed relationships with confidence, provenance
+- `intermediate/schema.json` — concept hierarchy and property definitions
+
+At startup, a `KnowledgeGraph` object builds in-memory indexes (nodes by ID, nodes by type, edges by node, name/alias search index) and a NetworkX `DiGraph` for graph algorithms. This data is loaded once via FastMCP's lifespan mechanism and shared across all tool calls.
+
+### Tools
+
+| Tool | What it does |
+|---|---|
+| `mykg_search_nodes` | Substring search across names, aliases, attributes; ranked by relevance |
+| `mykg_get_node` | Full node details by stable ID |
+| `mykg_get_neighbors` | Connected nodes with direction and edge type filtering |
+| `mykg_find_path` | Shortest path between two nodes via `nx.shortest_path` |
+| `mykg_get_schema` | Concept hierarchy and property definitions |
+| `mykg_list_node_types` | Entity types with counts |
+| `mykg_query_subgraph` | Filtered subgraph by node IDs, types, or minimum confidence |
+| `mykg_get_stats` | Node/edge counts, density, components, average degree |
+| `mykg_query_graph` | BFS/DFS traversal from seed nodes with token budget |
+| `mykg_hub_nodes` | Most connected nodes by degree |
+| `mykg_orphan_nodes` | Isolated nodes with zero edges |
+| `mykg_read_note` | Obsidian vault LLM wiki note for an entity |
+| `mykg_list_sessions` | All available sessions with status and size |
+
+### Transport
+
+Two transports are supported:
+- **stdio** (default) — the client launches `mykg mcp-serve` as a subprocess. Used by Claude Desktop.
+- **streamable HTTP** (`--transport streamable_http`) — the server listens on a configurable host/port. Used by Cherry Studio, MCP Inspector, and web-based clients. Multiple clients can connect simultaneously.
+
+### Session Selection
+
+When `--session` is omitted, the server auto-detects the latest completed session (most recent `mykg_sessions/` entry that has `output/nodes.jsonl`). Incomplete sessions are skipped. The `mykg_list_sessions` tool lets connected clients discover all available sessions.
+
+### Configuration
+
+Default transport, host, and port are set per profile in `mykg_config.yaml` under the `mcp:` block. CLI flags override these values.
+
+### Module
+
+The server is implemented as a single module (`src/mykg/mcp_server.py`) using FastMCP from the official MCP Python SDK. All tools use direct function parameters (no Pydantic wrapper models) for correct MCP argument passing. The CLI command is registered in `src/mykg/cli.py`.
+
+---
+
+## Skill vs MCP — Capability Comparison
+
+The mykg skill (`/mykg`) and the mykg MCP server (`mykg mcp-serve`) are complementary interfaces: the skill handles write/pipeline operations, the MCP server handles structured read/query operations. Both can be active in the same Claude Code session. When the MCP server is online, the skill's query path (Stage 4d) can delegate to MCP tools instead of manual grep/Read for more precise, indexed results.
+
+| Capability | mykg Skill (`/mykg`) | mykg MCP | Notes |
+|---|---|---|---|
+| **— Write / Pipeline Operations —** | | | |
+| Extract graph (fresh session) | **yes** — `extract-graph <dir>` | no | Skill drives the full LLM pipeline via inbox/outbox |
+| Append to session | **yes** — `--append` | no | |
+| Append + grow schema | **yes** — `--append-with-grow-schema` | no | D52 locked Pass 1 |
+| Resume / continue session | **yes** — `--session <name>` | no | |
+| Re-run from step | **yes** — `--from-step <step>` | no | Includes orphan fullsweep/incremental aliases |
+| Approve schema | **yes** — `approve-schema` | no | |
+| Generate walkthrough | **yes** — `walkthrough` | no | |
+| Parse docs (MinerU) | **yes** — `parse-docs` | no | |
+| Fetch web / clone repo | **yes** — `fetch-web` | no | Including chained fetch+extract |
+| Start/stop MCP server | **yes** — `mcp-serve` | no | |
+| **— Read / Query Operations —** | | | |
+| Search nodes by name/alias/attr | manual grep/Read | **`mykg_search_nodes`** | MCP has ranked matching (exact > prefix > substring > alias > attr) |
+| Get full node details by ID | manual Read + grep | **`mykg_get_node`** | MCP returns structured JSON with all attributes |
+| Get node neighbors + edges | manual grep on edges.jsonl | **`mykg_get_neighbors`** | MCP supports direction filter (in/out/both), edge type filter |
+| Find shortest path | **no** | **`mykg_find_path`** | MCP uses NetworkX; directed then undirected fallback |
+| Get schema | manual Read of schema.json | **`mykg_get_schema`** | MCP returns structured JSON |
+| List node types + counts | manual Read + tally | **`mykg_list_node_types`** | MCP returns sorted with sample IDs |
+| Filter subgraph | **no** | **`mykg_query_subgraph`** | Filter by node IDs, types, min confidence |
+| Graph stats (density, components, degree) | **no** | **`mykg_get_stats`** | MCP computes via NetworkX |
+| BFS/DFS traversal query | **no** | **`mykg_query_graph`** | MCP builds context window from seed nodes |
+| Hub nodes (most connected) | **no** | **`mykg_hub_nodes`** | MCP returns top-N by degree with in/out breakdown |
+| Orphan nodes (zero edges) | **no** | **`mykg_orphan_nodes`** | MCP returns all isolated nodes |
+| Read Obsidian vault note | manual Read of .md file | **`mykg_read_note`** | MCP resolves node_id to vault path; fallback if no vault |
+| List sessions + status | `ls -td mykg_sessions/*/` | **`mykg_list_sessions`** | MCP shows current/complete/incomplete, counts, vault status |
+| Free-text query (vault or jsonl) | **yes** — Stage 4d routing | partial (`mykg_query_graph`) | Skill routes vault-vs-jsonl by question phrasing; MCP does BFS/DFS traversal only |
+
+**Summary:**
+- The skill has **10 write/pipeline operations** the MCP server cannot perform (extract, append, resume, approve, walkthrough, parse-docs, fetch-web, etc.)
+- The MCP server has **6 graph-analysis tools** the skill lacks entirely: `find_path`, `query_subgraph`, `get_stats`, `query_graph` (BFS/DFS), `hub_nodes`, `orphan_nodes`
+- The MCP server has **7 structured query tools** that replace the skill's manual grep/Read: `search_nodes`, `get_node`, `get_neighbors`, `get_schema`, `list_node_types`, `read_note`, `list_sessions`
+- The skill's `query` verb (Stage 4d) provides free-text intent routing (vault vs jsonl) that the MCP server does not replicate — but the MCP server's individual tools are more precise and structured for programmatic use
 
 ---
 
@@ -347,6 +697,11 @@ The Claude Code skill in `src/mykg/data/skills/mykg/SKILL.md` exposes a single s
 | **Single config file** | `mykg_config.yaml` is the sole source of truth for all parameters | No hardcoded literals in pipeline or adapter code; switching provider, model, or tuning parameters requires only a config change |
 | **Pydantic for all data models** | All structured data between pipeline stages uses Pydantic BaseModel | Free JSON serialization, field validation, and type coercion at every pipeline boundary |
 | **Filesystem-backed agent provider** | Sixth `LLMAdapter` subclass that writes JSON tasks to a session-local inbox and polls a `.done` sentinel | Lets a Claude Code skill — or any other host with file access — supply LLM answers without modifying the 12-step pipeline, the orchestrator, or any of the 14 LLM call sites. The contract is JSON files on disk; testable with a mock drainer in `tmp_path` |
+| **Fetch-web as a standalone acquisition command** | `mykg fetch-web` has no session, no LLM calls, and no pipeline step of its own — it just writes a folder shaped like an `extract-graph` input | Acquisition and provenance are decoupled from extraction; the output folder can be inspected, edited, or reused independently before any LLM cost is incurred |
+| **MCP server as a query-only layer** | `mykg mcp-serve` loads a completed session into memory and serves 13 read-only tools via MCP; no extraction, no writes, no LLM calls | Clean separation between the extraction pipeline (expensive, long-running, write-heavy) and the query layer (fast, in-memory, read-only); any MCP client can query without understanding the pipeline |
+| **GitHub URL → shallow clone, not crawl** | `is_github_repo_url()` routes `github.com/<owner>/<repo>` to `git clone --depth N`, skipping Crawlee and the venv entirely | A repo's source files are better obtained via git than by crawling rendered HTML pages; avoids paying the Crawlee venv cost when it adds no value |
+| **Ephemeral Crawlee venv (mirrors MinerU)** | Crawlee runs in a per-invocation `uv`-managed venv, deleted on exit | Keeps Crawlee's dependency footprint out of mykg's own interpreter, exactly like the MinerU pattern in `preprocess` (D48) |
+| **Per-seed independent caps in `--url-list`** | Each seed in a multi-seed fetch gets its own `max_pages`/`max_depth`; no global budget | One large seed can't starve the others; per-seed manifests stay independently interpretable |
 
 ### Schema and Ontology
 
@@ -356,7 +711,38 @@ The Claude Code skill in `src/mykg/data/skills/mykg/SKILL.md` exposes a single s
 | **Concept hierarchy — store own, flatten for LLM** | Schema stores only own attributes per concept; pipeline flattens the inheritance chain before each extraction call | Compact, DRY schema representation; LLM always receives the complete attribute list without needing to understand inheritance |
 | **Synonym resolution — lexical only** | `synonym_match` uses exact string match, normalized string match, and optional SKOS thesaurus — no embedding similarity | Fast, deterministic, reproducible; no dependency on an embedding model or vector index |
 | **Base schema locking** | Optional `--base-schema` TTL locks classes and properties the LLM cannot rename, remove, or restructure | Lets you anchor an existing formal ontology while still allowing the LLM to extend it with domain-specific concepts |
+| **Frozen schema** | `--freeze-schema` (requires `--base-schema`) skips Pass 1 entirely and uses the TTL verbatim — no LLM-induced concepts or properties | Strict bring-your-own-ontology extraction: the graph contains exactly the types and relationships from your TTL, nothing more; saves 3 LLM calls |
+| **OWL input support** | `parse_base_schema` accepts `owl:Class`, `owl:ObjectProperty`, `owl:DatatypeProperty` alongside RDFS equivalents; output always normalized to RDFS | Users can supply formal OWL ontologies (e.g. from Protégé) without manual conversion; advanced OWL constructs are out of scope (don't map to the flat schema model) |
 | **Schema history** | Every schema write recorded as a numbered delta file in `intermediate/schema_history/` | Allows reconstruction of schema evolution across a run; useful for debugging harmonization and quality-review decisions |
+
+#### OWL Support Scope
+
+myKG is an *extractor*, not a *reasoner*. The base schema parser accepts OWL vocabulary declarations (what things exist and how they relate) but not OWL reasoning constructs (logical rules the graph must obey). Users needing reasoning should load `knowledge_graph.ttl` into a SPARQL endpoint with a reasoner (HermiT, Pellet).
+
+**Supported (basic OWL — vocabulary declarations):**
+
+| OWL Construct | What it does | myKG mapping |
+|---|---|---|
+| `owl:Class` | Declares a concept type | → `locked_classes` (same as `rdfs:Class`) |
+| `owl:ObjectProperty` | Declares a relationship between two classes | → `locked_properties` (same as `rdf:Property` with class range) |
+| `owl:DatatypeProperty` | Declares an attribute on a class | → class `attributes` list (same as `rdf:Property` with `rdfs:Literal` range) |
+| `rdfs:subClassOf` | Parent-child hierarchy | Already supported (shared between RDFS and OWL) |
+| `rdfs:domain` / `rdfs:range` | Which classes a property connects | Already supported (shared between RDFS and OWL) |
+
+**Not supported (advanced OWL — reasoning constructs):**
+
+| OWL Construct | What it does | Why it doesn't map to myKG |
+|---|---|---|
+| `owl:Restriction` | "Every Person must have exactly 1 birthDate" | myKG has no cardinality enforcement — extracts what the LLM finds |
+| `owl:equivalentClass` | "Employee = Person who has a works_at edge" | myKG doesn't do class expressions — types are flat labels |
+| `owl:disjointWith` | "A Person cannot also be an Organization" | myKG doesn't validate type exclusivity |
+| `owl:inverseOf` | "manages is the inverse of managed_by" | myKG stores edges one-way; no auto-generation of reverse edges |
+| `owl:TransitiveProperty` | "If A is in B and B is in C, then A is in C" | myKG doesn't do inference / reasoning |
+| `owl:SymmetricProperty` | "If A knows B, then B knows A" | No auto-generation of reverse edges |
+| `owl:FunctionalProperty` | "A Person has at most one birthDate" | No cardinality enforcement |
+| `owl:unionOf` / `owl:intersectionOf` | "Vehicle = Car OR Truck OR Bike" | No class algebra |
+| `owl:sameAs` / `owl:differentFrom` | "ex:NYC = dbpedia:New_York" | No identity resolution across ontologies |
+| `owl:allValuesFrom` / `owl:someValuesFrom` | "All employees of Acme must be Engineers" | No value restrictions |
 
 ### Extraction and Assembly
 

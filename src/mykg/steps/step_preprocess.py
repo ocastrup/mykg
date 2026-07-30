@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import shutil
 import subprocess
 import sys
@@ -13,6 +12,7 @@ from pathlib import Path
 from mykg import config as _cfg
 from mykg.logging import get
 from mykg.orchestrator import PipelineContext
+from mykg.utility.atomic_io import atomic_write_json
 
 log = get("mykg.steps.preprocess")
 
@@ -22,19 +22,18 @@ log = get("mykg.steps.preprocess")
 # the format, not a user preference — users toggle availability via the
 # preprocess.extensions allowlist in YAML.
 _HTML_BACKEND_SUFFIXES: frozenset[str] = frozenset({".html", ".htm"})
+_TXT_BACKEND_SUFFIXES: frozenset[str] = frozenset({".txt"})
 
 
 def _write_sentinel(intermediate_dir: Path, manifest: dict) -> None:
     intermediate_dir.mkdir(parents=True, exist_ok=True)
-    (intermediate_dir / "preprocess.done").write_text("done")
+    (intermediate_dir / "preprocess.done").write_text("done", encoding="utf-8")
     _atomic_write_json(intermediate_dir / "preprocess_manifest.json", manifest)
 
 
 def _atomic_write_json(path: Path, data: dict) -> None:
-    """Write JSON atomically: write to .tmp, then os.replace onto the target."""
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(data, indent=_cfg.JSON_INDENT))
-    os.replace(tmp, path)
+    """Write JSON atomically. Thin alias kept for in-module call sites."""
+    atomic_write_json(path, data)
 
 
 def _sha256_path(p: Path) -> str:
@@ -52,7 +51,7 @@ def _load_prior_manifest(intermediate_dir: Path) -> dict:
     if not p.exists():
         return {}
     try:
-        return json.loads(p.read_text())
+        return json.loads(p.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return {}
 
@@ -97,18 +96,20 @@ def _discover_non_md_files(
     input_dir: Path,
     subdir: str,
     allowed_exts: frozenset[str],
-) -> tuple[list[Path], list[Path], list[Path]]:
-    """Return (mineru_files, html_files, skipped) non-md files under input_dir.
+) -> tuple[list[Path], list[Path], list[Path], list[Path]]:
+    """Return (mineru_files, html_files, txt_files, skipped) non-md files under input_dir.
 
     A single allowlist `allowed_exts` controls which suffixes the preprocess
     step is permitted to convert. The backend per allowed suffix is derived
-    internally: suffix in `_HTML_BACKEND_SUFFIXES` → markdownify; otherwise →
+    internally: suffix in `_HTML_BACKEND_SUFFIXES` → markdownify;
+    suffix in `_TXT_BACKEND_SUFFIXES` → shutil.copy2 as .md; otherwise →
     MinerU. Files whose suffix is not in `allowed_exts` are skipped (logged +
     recorded, untouched on disk).
     """
     subdir_path = input_dir / subdir
     mineru_files: list[Path] = []
     html_files: list[Path] = []
+    txt_files: list[Path] = []
     skipped: list[Path] = []
     for p in input_dir.rglob("*"):
         if not p.is_file():
@@ -123,9 +124,11 @@ def _discover_non_md_files(
             continue
         if suffix in _HTML_BACKEND_SUFFIXES:
             html_files.append(p)
+        elif suffix in _TXT_BACKEND_SUFFIXES:
+            txt_files.append(p)
         else:
             mineru_files.append(p)
-    return mineru_files, html_files, skipped
+    return mineru_files, html_files, txt_files, skipped
 
 
 def _convert_html_files(
@@ -174,13 +177,51 @@ def _convert_html_files(
     return records
 
 
+def _convert_txt_files(
+    txt_files: list[Path],
+    input_dir: Path,
+    output_dir: Path,
+    source_files: dict[str, dict],
+) -> list[dict]:
+    """Copy each .txt file to .md via shutil.copy2, writing into output_dir.
+
+    On success, writes the converted output path back to
+    ``source_files[rel]["output_md"]``. Failures are logged + recorded but do
+    not halt the pipeline (D39).
+    """
+    records: list[dict] = []
+    for src in txt_files:
+        rel = src.relative_to(input_dir)
+        dst = output_dir / rel.with_suffix(".md")
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        t0 = time.monotonic()
+        try:
+            shutil.copy2(src, dst)
+        except Exception as exc:
+            log.warning("Step 0 — txt copy failed for %s: %s", rel, exc)
+            records.append({"path": str(rel), "ok": False, "error": str(exc)})
+            continue
+        duration = time.monotonic() - t0
+        log.info("Step 0 — txt → md: %s (%.2fs)", rel, duration)
+        records.append(
+            {
+                "path": str(rel),
+                "ok": True,
+                "output": str(dst.relative_to(input_dir)),
+                "duration_seconds": round(duration, 2),
+            }
+        )
+        source_files[str(rel)]["output_md"] = str(dst.relative_to(input_dir))
+    return records
+
+
 def run_preprocess(ctx: PipelineContext) -> None:
     if not _cfg.PREPROCESS_ENABLED:
         log.info("Step 0 — preprocess disabled in config; skipping")
         _write_sentinel(ctx.intermediate_dir, {"enabled": False})
         return
 
-    mineru_files, html_files, skipped = _discover_non_md_files(
+    mineru_files, html_files, txt_files, skipped = _discover_non_md_files(
         ctx.input_dir,
         _cfg.PREPROCESS_SUBDIR,
         _cfg.PREPROCESS_EXTENSIONS,
@@ -197,7 +238,7 @@ def run_preprocess(ctx: PipelineContext) -> None:
         for r in skipped_records:
             log.info("Step 0 —   skipped: %s", r["path"])
 
-    if not mineru_files and not html_files:
+    if not mineru_files and not html_files and not txt_files:
         log.info("Step 0 — no eligible non-md files to preprocess; skipping")
         # Honor cleanup of leftover .md outputs from prior runs whose source
         # files have been removed. Without this, deleting a PDF leaves its
@@ -223,7 +264,7 @@ def run_preprocess(ctx: PipelineContext) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     prior_sources: dict = _load_prior_manifest(ctx.intermediate_dir).get("source_files", {})
-    hashes = _hash_files_parallel(mineru_files + html_files, ctx.ingest_workers)
+    hashes = _hash_files_parallel(mineru_files + html_files + txt_files, ctx.ingest_workers)
 
     def _is_unchanged(rel: str, sha: str) -> bool:
         entry = prior_sources.get(rel)
@@ -235,10 +276,13 @@ def run_preprocess(ctx: PipelineContext) -> None:
     source_files: dict[str, dict] = {}
     to_process_mineru: list[tuple[Path, str]] = []
     to_process_html: list[tuple[Path, str]] = []
+    to_process_txt: list[tuple[Path, str]] = []
     skipped_unchanged = 0
-    for src, bucket in [(p, to_process_mineru) for p in mineru_files] + [
-        (p, to_process_html) for p in html_files
-    ]:
+    for src, bucket in (
+        [(p, to_process_mineru) for p in mineru_files]
+        + [(p, to_process_html) for p in html_files]
+        + [(p, to_process_txt) for p in txt_files]
+    ):
         rel = str(src.relative_to(ctx.input_dir))
         if _is_unchanged(rel, hashes[src]):
             source_files[rel] = prior_sources[rel]
@@ -269,6 +313,13 @@ def run_preprocess(ctx: PipelineContext) -> None:
         log.info("Step 0 — converting %d HTML file(s) via markdownify", len(to_process_html))
         html_records = _convert_html_files(
             [src for src, _ in to_process_html], ctx.input_dir, output_dir, source_files
+        )
+
+    txt_records: list[dict] = []
+    if to_process_txt:
+        log.info("Step 0 — copying %d txt file(s) as .md via shutil", len(to_process_txt))
+        txt_records = _convert_txt_files(
+            [src for src, _ in to_process_txt], ctx.input_dir, output_dir, source_files
         )
 
     mineru_returncode = 0
@@ -334,12 +385,13 @@ def run_preprocess(ctx: PipelineContext) -> None:
                 canonical = target
             source_files[rel]["output_md"] = str(canonical.relative_to(ctx.input_dir))
 
-    total_files = len(mineru_files) + len(html_files)
+    total_files = len(mineru_files) + len(html_files) + len(txt_files)
     log.info(
-        "Step 0 — preprocess complete (mineru=%d in %.1fs, html=%d, skipped=%d, unchanged=%d)",
+        "Step 0 — preprocess complete (mineru=%d in %.1fs, html=%d, txt=%d, skipped=%d, unchanged=%d)",
         len(to_process_mineru),
         mineru_duration,
         len(to_process_html),
+        len(to_process_txt),
         len(skipped),
         skipped_unchanged,
     )
@@ -350,10 +402,12 @@ def run_preprocess(ctx: PipelineContext) -> None:
             "files_found": total_files,
             "mineru_files": len(to_process_mineru),
             "html_files": len(to_process_html),
+            "txt_files": len(to_process_txt),
             "mineru_duration_seconds": round(mineru_duration, 2),
             "mineru_returncode": mineru_returncode,
             "subdir": _cfg.PREPROCESS_SUBDIR,
             "html_records": html_records,
+            "txt_records": txt_records,
             "skipped_files": skipped_records,
             "source_files": source_files,
             "unchanged_count": skipped_unchanged,

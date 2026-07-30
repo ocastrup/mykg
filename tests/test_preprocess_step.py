@@ -521,3 +521,84 @@ def test_keep_artifacts_false_preserves_subfolder_structure(tmp_path: Path) -> N
     sub = ctx.input_dir / cfg.PREPROCESS_SUBDIR
     assert (sub / "dir1" / "deep.md").exists()
     assert not (sub / "dir1" / "deep").exists()
+
+
+# ---------------------------------------------------------------------------
+# .txt file support — shutil.copy2 as .md
+# ---------------------------------------------------------------------------
+
+
+def test_preprocess_copies_txt_file(tmp_path: Path) -> None:
+    """TXT files routed through _convert_txt_files (shutil.copy2 as .md)."""
+    ctx = _make_ctx(tmp_path)
+    (ctx.input_dir / "notes.txt").write_text("Some plain text content")
+
+    with (
+        patch("mykg.config.PREPROCESS_ENABLED", True),
+        patch("mykg.steps.step_preprocess.subprocess.run") as fake_run,
+    ):
+        run_preprocess(ctx)
+
+    fake_run.assert_not_called()
+    subdir_name = __import__("mykg.config", fromlist=["PREPROCESS_SUBDIR"]).PREPROCESS_SUBDIR
+    sub = ctx.input_dir / subdir_name if subdir_name else ctx.input_dir
+    converted = sub / "notes.md"
+    assert converted.exists()
+    assert converted.read_text() == "Some plain text content"
+
+
+def test_preprocess_txt_and_pdf_combined(tmp_path: Path) -> None:
+    """When both TXT and PDF files are present, both pathways run."""
+    ctx = _make_ctx(tmp_path)
+    (ctx.input_dir / "notes.txt").write_text("plain text")
+    (ctx.input_dir / "doc.pdf").write_bytes(b"%PDF fake")
+
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, 0)
+
+    with (
+        patch("mykg.config.PREPROCESS_ENABLED", True),
+        patch("mykg.steps.step_preprocess.subprocess.run", side_effect=fake_run),
+    ):
+        run_preprocess(ctx)
+
+    import json as _json
+
+    manifest = _json.loads((ctx.intermediate_dir / "preprocess_manifest.json").read_text())
+    assert manifest["txt_files"] == 1
+    assert manifest["mineru_files"] == 1
+
+
+def test_preprocess_txt_change_detection(tmp_path: Path) -> None:
+    """TXT files participate in the same SHA-based skip path as other file types."""
+    import mykg.config as cfg
+
+    ctx = _make_ctx(tmp_path)
+    txt_bytes = b"cached text content"
+    (ctx.input_dir / "notes.txt").write_bytes(txt_bytes)
+
+    sub = ctx.input_dir / cfg.PREPROCESS_SUBDIR
+    sub.mkdir(parents=True, exist_ok=True)
+    prior_md = sub / "notes.md"
+    prior_md.write_text("# cached txt output")
+
+    _seed_prior_manifest(
+        ctx.intermediate_dir,
+        {
+            "notes.txt": {
+                "sha256": _sha256_bytes(txt_bytes),
+                "output_md": str(prior_md.relative_to(ctx.input_dir)),
+            }
+        },
+    )
+
+    with patch("mykg.config.PREPROCESS_ENABLED", True):
+        run_preprocess(ctx)
+
+    assert prior_md.read_text() == "# cached txt output"
+
+    import json as _json
+
+    manifest = _json.loads((ctx.intermediate_dir / "preprocess_manifest.json").read_text())
+    assert manifest["unchanged_count"] == 1
+    assert manifest["txt_files"] == 0

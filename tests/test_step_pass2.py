@@ -87,7 +87,11 @@ def test_load_manifest_missing(tmp_path):
         _load_manifest(ctx)
 
 
-def test_run_pass2_step_fresh_extraction(tmp_path):
+def test_run_pass2_step_fresh_extraction(tmp_path, monkeypatch):
+    import mykg.config as cfg
+
+    monkeypatch.setattr(cfg, "PASS2_PREP_MODE", "per_file")
+
     ctx = _make_ctx(tmp_path)
     _write_schema(ctx)
     (ctx.intermediate_dir / "flattened_schema.json").write_text(
@@ -103,8 +107,12 @@ def test_run_pass2_step_fresh_extraction(tmp_path):
     assert "doc.md" in raw
 
 
-def test_run_pass2_step_skips_shards_already_present(tmp_path):
+def test_run_pass2_step_skips_shards_already_present(tmp_path, monkeypatch):
     """With existing shards, pass2 skips those files."""
+    import mykg.config as cfg
+
+    monkeypatch.setattr(cfg, "PASS2_PREP_MODE", "per_file")
+
     ctx = _make_ctx(tmp_path)
     _write_schema(ctx)
     (ctx.intermediate_dir / "flattened_schema.json").write_text(
@@ -212,6 +220,36 @@ def test_run_pass2_step_batch_chunks_mode(tmp_path, monkeypatch):
     assert batch_map_path.exists()
 
 
+def test_run_pass2_step_batch_chunks_mode_persists_failed_batch_shard(tmp_path, monkeypatch):
+    """A batch whose LLM response never parses as valid JSON writes a
+    pass2_raw_batches/<index>.json shard with status "failed" and an error
+    message — not silently dropped."""
+    import mykg.config as cfg
+
+    monkeypatch.setattr(cfg, "PASS2_PREP_MODE", "batch_chunks")
+    monkeypatch.setattr(cfg, "PASS2_BATCH_RETRY_MAX", 0)
+
+    ctx = _make_ctx(tmp_path)
+    ctx.adapter = MockAdapter(response="not valid json {{{")
+    _write_schema(ctx)
+    (ctx.intermediate_dir / "flattened_schema.json").write_text(
+        json.dumps({"Person": ["name"], "Organization": ["name"]})
+    )
+    (ctx.intermediate_dir / "file_manifest.json").write_text(
+        json.dumps({"doc.md": "Alice works at Acme."})
+    )
+
+    run_pass2_step(ctx)
+
+    shard_dir = ctx.intermediate_dir / "pass2_raw_batches"
+    shards = list(shard_dir.glob("*.json"))
+    assert len(shards) == 1
+    entry = json.loads(shards[0].read_text())
+    assert entry["status"] == "failed"
+    assert "error" in entry
+    assert entry["source_files"] == ["doc.md"]
+
+
 def test_load_manifest_with_dict_entry(tmp_path):
     """Manifest entries may be dicts (with content key) or bare strings."""
     ctx = _make_ctx(tmp_path)
@@ -221,20 +259,116 @@ def test_load_manifest_with_dict_entry(tmp_path):
     assert out == manifest
 
 
-def test_run_pass2_step_concat_mode_creates_batches(tmp_path, monkeypatch):
-    """When PREP_MODE == 'concat', pass2_concat_map.json is written."""
+def _concat_ctx(tmp_path: Path, monkeypatch, response=None) -> PipelineContext:
     import mykg.config as cfg
 
     monkeypatch.setattr(cfg, "PASS2_PREP_MODE", "concat")
-
     ctx = _make_ctx(tmp_path)
+    if response is not None:
+        ctx.adapter = MockAdapter(response)
     _write_schema(ctx)
     (ctx.intermediate_dir / "flattened_schema.json").write_text(
         json.dumps({"Person": ["name"], "Organization": ["name"]})
     )
+    return ctx
+
+
+def test_concat_shards_keyed_by_real_files(tmp_path, monkeypatch):
+    """Concat persists shards keyed by REAL filenames, not virtual concat_batch_* names."""
+    ctx = _concat_ctx(
+        tmp_path,
+        monkeypatch,
+        response='{"nodes": [{"id": "person-x", "type": "Person", '
+        '"attributes": {"name": {"value": "X", "confidence": 1.0}}}], "edges": []}',
+    )
     (ctx.intermediate_dir / "file_manifest.json").write_text(
-        json.dumps({"doc.md": "Alice. " * 50, "doc2.md": "Bob. " * 50})
+        json.dumps({"a.md": "Alice.", "b.md": "Bob."})
     )
 
     run_pass2_step(ctx)
-    assert (ctx.intermediate_dir / "pass2_concat_map.json").exists()
+
+    raw = json.loads((ctx.intermediate_dir / "raw_extractions.json").read_text())
+    assert set(raw.keys()) == {"a.md", "b.md"}
+    assert not any(k.startswith("concat_batch_") for k in raw)
+
+    shard_dir = ctx.intermediate_dir / "raw_extractions_shards"
+    shard_files = {p.name for p in shard_dir.glob("*.json")}
+    assert shard_files == {"a.md.json", "b.md.json"}
+    assert not any(n.startswith("concat_batch_") for n in shard_files)
+    # Concat keeps the original whole-file-packing + window-sized-call path; it does
+    # not persist a batch/concat map (resumability keys on real filenames now).
+    assert not (ctx.intermediate_dir / "pass2_concat_map.json").exists()
+
+
+def test_concat_fans_out_to_member_shards(tmp_path, monkeypatch):
+    """A multi-file concat batch writes one real-keyed shard per member file, each
+    carrying the batch result (assembler dedup collapses the duplication later)."""
+    ctx = _concat_ctx(
+        tmp_path,
+        monkeypatch,
+        response='{"nodes": [{"id": "person-x", "type": "Person", '
+        '"attributes": {"name": {"value": "X", "confidence": 1.0}}}], "edges": []}',
+    )
+    # Two tiny same-dir files → one virtual batch → fan-out to two real shards.
+    (ctx.intermediate_dir / "file_manifest.json").write_text(
+        json.dumps({"dir/a.md": "Alice.", "dir/b.md": "Bob."})
+    )
+
+    run_pass2_step(ctx)
+
+    shard_dir = ctx.intermediate_dir / "raw_extractions_shards"
+    names = {p.name for p in shard_dir.glob("*.json")}
+    assert names == {"dir_a.md.json", "dir_b.md.json"}
+    for n in names:
+        data = json.loads((shard_dir / n).read_text())
+        assert data["_fname"].startswith("dir/")
+        assert len(data["data"]["nodes"]) == 1  # the batch result, fanned out to each
+
+
+def test_concat_append_detects_only_changed_file(tmp_path, monkeypatch):
+    """Real-file-keyed shards make append skip unchanged files and extract only the new one."""
+    ctx = _concat_ctx(tmp_path, monkeypatch, response='{"nodes": [], "edges": []}')
+    shard_dir = ctx.intermediate_dir / "raw_extractions_shards"
+    chunk_shard_dir = ctx.intermediate_dir / "chunk_index_shards"
+    shard_dir.mkdir()
+    chunk_shard_dir.mkdir()
+    for n in ("a.md", "b.md"):
+        (shard_dir / f"{n}.json").write_text(
+            json.dumps({"_fname": n, "data": {"nodes": [], "edges": []}})
+        )
+        (chunk_shard_dir / f"{n}.json").write_text(json.dumps({"_fname": n, "data": {}}))
+    (ctx.intermediate_dir / "file_manifest.json").write_text(
+        json.dumps({"a.md": "A", "b.md": "B", "c.md": "C"})
+    )
+    ctx.append = True
+    ctx.append_new_files = {"c.md"}
+
+    run_pass2_step(ctx)
+
+    raw = json.loads((ctx.intermediate_dir / "raw_extractions.json").read_text())
+    assert set(raw.keys()) == {"a.md", "b.md", "c.md"}
+    assert not any(k.startswith("concat_batch_") for k in raw)
+
+
+def test_concat_legacy_virtual_shards_migrated(tmp_path, monkeypatch):
+    """A pre-existing concat_batch_* shard is cleared and the session rebuilds real-keyed."""
+    ctx = _concat_ctx(tmp_path, monkeypatch, response='{"nodes": [], "edges": []}')
+    shard_dir = ctx.intermediate_dir / "raw_extractions_shards"
+    chunk_shard_dir = ctx.intermediate_dir / "chunk_index_shards"
+    shard_dir.mkdir()
+    chunk_shard_dir.mkdir()
+    # Legacy virtual-batch shard from a pre-refactor concat run.
+    (shard_dir / "concat_batch_0000.md.json").write_text(
+        json.dumps({"_fname": "concat_batch_0000.md", "data": {"nodes": [{"id": "stale"}], "edges": []}})
+    )
+    (ctx.intermediate_dir / "pass2_concat_map.json").write_text("{}")
+    (ctx.intermediate_dir / "file_manifest.json").write_text(
+        json.dumps({"a.md": "Alice."})
+    )
+
+    run_pass2_step(ctx)
+
+    raw = json.loads((ctx.intermediate_dir / "raw_extractions.json").read_text())
+    assert set(raw.keys()) == {"a.md"}
+    assert "stale" not in json.dumps(raw)
+    assert not any(p.name.startswith("concat_batch_") for p in shard_dir.glob("*.json"))

@@ -33,6 +33,13 @@ Review this schema and fix ALL of the following issues you find:
 Return ONLY the corrected schema JSON with keys "concepts" and "properties".
 No explanation. No markdown fences. Preserve all entries not affected by the above.
 
+GROUNDING
+=========
+All changes must be derivable from the input schema. Do not add concepts, properties,
+or attributes from your training data or world knowledge. You may add "name" to a bare
+concept (rule 1 above) and rename for consistency (rule 4), but do not invent new
+schema elements that were not present or implied by the input.
+
 RULES
 =====
 - Do NOT add a "Relationship" class. Relationships are entries in properties[], not classes.
@@ -65,5 +72,9 @@ RULES
   entities or domain-specific subtypes.
 - CLASSES vs. INSTANCES — this is the most common mistake: do NOT propose a concept
   type for a specific, named, one-of-a-kind entity.
+- PRESERVE IDENTITY-LINKING PROPERTIES — do not remove or rename properties like
+  "same_as", "alias_of", or "became" that link alter-ego / identity-split nodes.
+  These are structurally necessary for connecting entities that operate under different
+  names, roles, or eras (e.g. pre/post-rebrand, birth name vs adopted name).
 
 ## SCHEMA:

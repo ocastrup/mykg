@@ -13,6 +13,7 @@ from mykg.orphan_connector import (
     confirm_orphan_chunk_groups,
     propose_schema_additions,
 )
+from mykg.utility.atomic_io import atomic_write_json
 
 log = get("mykg.steps.orphan_connect")
 
@@ -27,29 +28,25 @@ def _edge_id(edge: dict) -> str:
 def run_orphan_connect(ctx: PipelineContext) -> None:
     if not _cfg.ORPHAN_PASS_ENABLED:
         log.info("Step orphan_connect — skipped (orphan_pass.enabled: false)")
-        (ctx.intermediate_dir / "orphan_connections.json").write_text(
-            json.dumps({}, indent=_cfg.JSON_INDENT)
-        )
-        (ctx.intermediate_dir / "orphan_log.json").write_text(
-            json.dumps([], indent=_cfg.JSON_INDENT)
-        )
+        atomic_write_json(ctx.intermediate_dir / "orphan_connections.json", {})
+        atomic_write_json(ctx.intermediate_dir / "orphan_log.json", [])
         return
 
-    raw_payload = json.loads((ctx.intermediate_dir / "orphan_candidates.json").read_text())
+    raw_payload = json.loads((ctx.intermediate_dir / "orphan_candidates.json").read_text(encoding="utf-8"))
     groups = [OrphanChunkGroup(**g) for g in raw_payload.get("groups", [])]
     schema_gap_orphans = [SchemaGapOrphan(**g) for g in raw_payload.get("schema_gap_orphans", [])]
 
     nodes = ctx.nodes
     if nodes is None:
-        nodes = json.loads((ctx.intermediate_dir / "nodes.json").read_text())
+        nodes = json.loads((ctx.intermediate_dir / "nodes.json").read_text(encoding="utf-8"))
 
-    schema = json.loads((ctx.intermediate_dir / "schema.json").read_text())
+    schema = json.loads((ctx.intermediate_dir / "schema.json").read_text(encoding="utf-8"))
 
     file_manifest = ctx.file_contents
     if file_manifest is None:
         manifest_path = ctx.intermediate_dir / "file_manifest.json"
         if manifest_path.exists():
-            file_manifest = json.loads(manifest_path.read_text())
+            file_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
 
     chunk_texts: dict[str, str] = build_chunk_texts(file_manifest) if file_manifest else {}
     if not chunk_texts:
@@ -62,7 +59,7 @@ def run_orphan_connect(ctx: PipelineContext) -> None:
     prior_connections: dict[str, dict] = {}
     orphan_connections_path = ctx.intermediate_dir / "orphan_connections.json"
     if ctx.orphan_incremental and orphan_connections_path.exists():
-        prior_connections = json.loads(orphan_connections_path.read_text())
+        prior_connections = json.loads(orphan_connections_path.read_text(encoding="utf-8"))
 
     already_connected: set[str] = set()
     for edge in prior_connections.values():
@@ -89,7 +86,7 @@ def run_orphan_connect(ctx: PipelineContext) -> None:
         error_gate=ctx.error_gate,
     )
 
-    (ctx.intermediate_dir / "nodes.json").write_text(json.dumps(nodes, indent=_cfg.JSON_INDENT))
+    atomic_write_json(ctx.intermediate_dir / "nodes.json", nodes)
     ctx.nodes = nodes
 
     # Seed from prior run; new confirmations are overlaid (dedup by ID).
@@ -144,7 +141,7 @@ def run_orphan_connect(ctx: PipelineContext) -> None:
             )
 
     edge_metadata_path = ctx.intermediate_dir / "edge_metadata.json"
-    edge_metadata = json.loads(edge_metadata_path.read_text())
+    edge_metadata = json.loads(edge_metadata_path.read_text(encoding="utf-8"))
     skipped = 0
     for eid, edge in orphan_connections.items():
         if eid in edge_metadata:
@@ -152,15 +149,11 @@ def run_orphan_connect(ctx: PipelineContext) -> None:
             continue
         edge_metadata[eid] = edge
 
-    edge_metadata_path.write_text(json.dumps(edge_metadata, indent=_cfg.JSON_INDENT))
+    atomic_write_json(edge_metadata_path, edge_metadata)
     ctx.edge_metadata = edge_metadata
 
-    (ctx.intermediate_dir / "orphan_log.json").write_text(
-        json.dumps(orphan_log, indent=_cfg.JSON_INDENT)
-    )
-    (ctx.intermediate_dir / "orphan_connections.json").write_text(
-        json.dumps(orphan_connections, indent=_cfg.JSON_INDENT)
-    )
+    atomic_write_json(ctx.intermediate_dir / "orphan_log.json", orphan_log)
+    atomic_write_json(ctx.intermediate_dir / "orphan_connections.json", orphan_connections)
 
     log.info(
         "Step orphan_connect — %d edge(s) added to edge_metadata.json (%d skipped as duplicates)",
@@ -190,8 +183,9 @@ def run_orphan_connect(ctx: PipelineContext) -> None:
                 "schema_max_restarts=0; skipping schema proposal LLM call.",
                 len(schema_gap_orphans),
             )
-            (ctx.intermediate_dir / "schema_gap_proposals.json").write_text(
-                json.dumps({"new_properties": []}, indent=_cfg.JSON_INDENT)
+            atomic_write_json(
+                ctx.intermediate_dir / "schema_gap_proposals.json",
+                {"new_properties": []},
             )
             return
         log.info(
@@ -200,8 +194,9 @@ def run_orphan_connect(ctx: PipelineContext) -> None:
             len(schema_gap_orphans),
         )
         proposal = propose_schema_additions(schema_gap_orphans, schema, ctx.adapter, chunk_texts)
-        (ctx.intermediate_dir / "schema_gap_proposals.json").write_text(
-            json.dumps(proposal or {"new_properties": []}, indent=_cfg.JSON_INDENT)
+        atomic_write_json(
+            ctx.intermediate_dir / "schema_gap_proposals.json",
+            proposal or {"new_properties": []},
         )
 
         if proposal and proposal.get("new_properties"):

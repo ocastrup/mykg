@@ -1,0 +1,5 @@
+title: "myKG — Knowledge Graph Extractor"
+description: AI workflow that turns documents into a confidence-scored knowledge graph with an induced RDFS/OWL ontology
+theme: jekyll-theme-cayman
+show_downloads: false
+baseurl: "/mykg"

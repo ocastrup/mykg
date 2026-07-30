@@ -1,11 +1,11 @@
 ---
 name: mykg
-description: Run mykg knowledge-graph commands inside Claude Code from one slash command `/mykg`. The user describes intent in natural language (extract, append, resume, approve, walkthrough, parse-docs, query); the skill parses intent, builds the right `mykg` CLI command from the live `--help` output, confirms, runs it, and drives the inbox/outbox watch loop for LLM-bearing commands (extract-graph). Also handles read-only queries against existing sessions (`query`) by reading `obsidian_vault/` or `nodes.jsonl`/`edges.jsonl` directly — no CLI call. Excludes `mykg init` (interactive shell command) and `mykg merge-graphs` (follow-up planning).
+description: Run mykg knowledge-graph commands inside Claude Code from one slash command `/mykg`. The user describes intent in natural language (extract, append, resume, approve, walkthrough, parse-docs, fetch-web, query); the skill parses intent, builds the right `mykg` CLI command from the live `--help` output, confirms, runs it, and drives the inbox/outbox watch loop for LLM-bearing commands (extract-graph). For read-only queries, prefers MCP tools when the mykg MCP server is online, falling back to reading session files directly, with the `mykg query` CLI as a last-resort fallback. Ensures `.mcp.json` is configured (with user approval). Excludes `mykg init` (interactive shell command) and `mykg merge-graphs` (follow-up planning).
 ---
 
 # mykg — single slash command, intent-driven CLI dispatcher
 
-This skill is the agent-mode driver for **mykg**. The user types `/mykg <free text>` describing what they want; the skill parses the intent, assembles the matching `mykg` CLI command (with live `--help` as ground truth for flags), confirms expensive actions, and executes. For LLM-bearing subcommands (`extract-graph`), it then drives the inbox/outbox watch loop. For synchronous subcommands (`walkthrough`, `approve-schema`, `parse-docs`), it shells out and reports. For the read-only `query` verb, it reads files from the latest session directly — no subprocess, no LLM call from the skill.
+This skill is the agent-mode driver for **mykg**. The user types `/mykg <free text>` describing what they want; the skill parses the intent, assembles the matching `mykg` CLI command (with live `--help` as ground truth for flags), confirms expensive actions, and executes. For LLM-bearing subcommands (`extract-graph`), it then drives the inbox/outbox watch loop. For synchronous subcommands (`walkthrough`, `approve-schema`, `parse-docs`), it shells out and reports. For the read-only `query` verb, it prefers MCP tools when the mykg MCP server is online, falling back to reading session files directly when MCP is unavailable, with the `mykg query` CLI as a last-resort fallback.
 
 The pipeline code, the orchestrator, all prompts, all 12 pipeline steps, and the inbox/outbox contract are **unchanged**. This skill only changes how `mykg` is invoked from inside Claude Code.
 
@@ -50,11 +50,20 @@ Trigger this skill whenever the user types `/mykg <anything>`. Map the intent to
 | `/mykg extract more from ./more_docs` | `mykg extract-graph ./more_docs` (**fresh session** — "more" is NOT an explicit reuse signal; this is just another extract) |
 | `/mykg extract ./docs with human review` | `mykg extract-graph ./docs --review` (**fresh session — no `--session`**) |
 | `/mykg append the new notes in ./docs` | `mykg extract-graph ./docs --append --session <auto-detect-most-recent>` (explicit reuse via `append`) |
+| `/mykg append and grow schema from ./docs` | `mykg extract-graph ./docs --append-with-grow-schema --session <auto-detect-most-recent>` (explicit reuse via `append`; locked Pass 1 runs over changed files to expand the schema) |
+| `/mykg expand the schema with new docs in ./docs` | `mykg extract-graph ./docs --append-with-grow-schema --session <auto-detect-most-recent>` ("expand schema" → `--append-with-grow-schema`) |
 | `/mykg resume the last session` | `mykg extract-graph --session <most-recent>` (explicit reuse via `resume the last session`) |
 | `/mykg approve the schema` | `mykg approve-schema --session <most-recent>` (session-only subcommand) |
 | `/mykg make a walkthrough` | `mykg walkthrough --session <most-recent>` (session-only subcommand) |
 | `/mykg make a walkthrough for 2026-06-02T17-30-00` | `mykg walkthrough --session 2026-06-02T17-30-00` (literal session name) |
 | `/mykg convert pdfs in ./inbox to ./md` | `mykg parse-docs --input ./inbox --output ./md` (no session concept) |
+| `/mykg fetch https://example.com` | `mykg fetch-web https://example.com` (no session concept) |
+| `/mykg fetch https://example.com into ./my_output_dir` (user names the output folder) | `mykg fetch-web https://example.com --output ./my_output_dir` (no session concept) |
+| `/mykg fetch https://example.com and extract` | `mykg fetch-web https://example.com`, then on success `mykg extract-graph <printed output dir>` (**fresh session**) — chained two-step intent |
+| `/mykg download the github repo SenolIsci/mykg` | `mykg fetch-web https://github.com/SenolIsci/mykg` (GitHub URL → clone path, no session concept) |
+| `/mykg fetch these urls: urls.txt into ./mykg_web_fetch/batch` | `mykg fetch-web --url-list urls.txt --output ./mykg_web_fetch/batch` (no session concept) |
+| `/mykg fetch these urls: <url1> <url2> <url3> ...` (URLs typed inline, not a file path) | write each URL on its own line to a temp file `mykg_urls.txt` (in cwd), then `mykg fetch-web --url-list mykg_urls.txt --output ./mykg_web_fetch/batch` (no session concept) |
+| `/mykg fetch these urls: <url1> <url2> <url3> ... and extract` (URLs typed inline) | same temp-file step as above, then `mykg fetch-web --url-list mykg_urls.txt --output ./mykg_web_fetch/batch`; on success, for **each** per-seed output subdir reported in the manifest, run `mykg extract-graph <subdir>` (**fresh session per subdir**) — chained multi-seed intent |
 | `/mykg query who is Alice` | read-only — Stage 4d on the latest session; vault-first because the phrasing names an entity (wiki-style) |
 | `/mykg query what does the wiki say about <topic>` | read-only — Stage 4d on the latest session; **vault path** (`obsidian_vault/`); word "wiki" is explicit |
 | `/mykg query most connected node in the knowledge graph` | read-only — Stage 4d on the latest session; **jsonl path** (`nodes.jsonl` + `edges.jsonl`); words "knowledge graph" / "most connected" are structural |
@@ -63,6 +72,11 @@ Trigger this skill whenever the user types `/mykg <anything>`. Map the intent to
 | `/mykg from-step orphan_connect on the last session` | `mykg extract-graph --session <most-recent> --from-step orphan_connect` (explicit reuse via `the last session` + `--from-step`) |
 | `/mykg rerun orphan-connect from scratch on the last session` | `mykg extract-graph --session <most-recent> --from-step orphan_connect_fullsweep` (explicit reuse via `the last session`) |
 | `/mykg redo orphans but keep what we already confirmed` | `mykg extract-graph --session <most-recent> --from-step orphan_connect_incremental` (explicit reuse via `redo` — `--from-step` always operates on an existing session) |
+| `/mykg start mcp server` | `mykg mcp-serve --transport streamable_http --port 3100` (starts MCP server on HTTP; no session concept) |
+| `/mykg start mcp` | `mykg mcp-serve` (starts MCP server with defaults from config; no session concept) |
+| `/mykg start mcp for session <name>` | `mykg mcp-serve --session <name>` (MCP server for a specific session) |
+| `/mykg stop mcp` | `mykg mcp-serve --stop` (stops a running HTTP MCP server) |
+| `/mykg mcp status` | check if MCP server is running: `ps aux \| grep "mcp-serve" \| grep -v grep` |
 | `/mykg init` | refuse: "Run `mykg init` from a shell — it is interactive." |
 | `/mykg merge sessions A and B` | refuse: "Skill support for `mykg merge-graphs` is planned in a follow-up. Run from a shell." |
 
@@ -77,6 +91,7 @@ EXTRACT_HELP=$(uv run mykg extract-graph --help 2>&1)
 WALKTHROUGH_HELP=$(uv run mykg walkthrough --help 2>&1)
 APPROVE_HELP=$(uv run mykg approve-schema --help 2>&1)
 PARSE_HELP=$(uv run mykg parse-docs --help 2>&1)
+FETCH_HELP=$(uv run mykg fetch-web --help 2>&1)
 ```
 
 Use these cached values to:
@@ -86,11 +101,45 @@ Use these cached values to:
 
 ---
 
+## MCP configuration — ensure `.mcp.json` exists
+
+At the start of every skill turn, check whether the project has a `.mcp.json` file that configures the mykg MCP server for Claude Code. If it does not exist, **ask the user for approval** before creating it:
+
+```
+I noticed this project doesn't have a .mcp.json file to configure the mykg
+MCP server for Claude Code. The MCP server provides 14 structured read-only
+tools (search, neighbors, shortest path, hub nodes, subgraph queries, etc.)
+that are faster and more precise than manual grep/Read for graph queries.
+
+Shall I create .mcp.json with this content?
+
+  {
+    "mcpServers": {
+      "mykg": {
+        "command": "mykg",
+        "args": ["mcp-serve"]
+      }
+    }
+  }
+
+This tells Claude Code to start `mykg mcp-serve` as an MCP subprocess,
+making the `mcp__mykg__*` tools available in this session. The server
+auto-discovers the latest session on startup.
+```
+
+If the user approves, write the file. If the user declines, proceed without it — the skill falls back to manual grep/Read in Stage 4d as before.
+
+If `.mcp.json` already exists but does **not** contain a `mykg` server entry, ask the user whether to add one (preserve the existing entries). If it already has a `mykg` entry, do nothing.
+
+**Do not create `.mcp.json` without user approval.** This file affects the Claude Code session and the user must consent.
+
+---
+
 ## Stage 1 — parse intent
 
 From the user's `/mykg <free text>` message extract:
 
-1. **Verb** — extract / append / approve / walkthrough / parse / resume / init / merge / **query** → maps to a CLI subcommand, a refusal, or the read-only file-read path (`query`).
+1. **Verb** — extract / append / approve / walkthrough / parse / fetch / download / resume / init / merge / **query** → maps to a CLI subcommand, a refusal, or the read-only file-read path (`query`). Fetch / download (URL or GitHub repo) maps to `fetch-web` — no session, same category as `parse-docs`.
 2. **Input dir** — the path the user named, or `.` if they said "this folder", or absent for session-only commands (including `query`).
 3. **Session** — **default: do not pass `--session` at all** so mykg auto-creates a fresh timestamped session. Only override the default when the current user message contains an explicit reuse signal (see "Default behaviour" above). Resolution order:
    1. **Literal session name.** User typed `--session <name>` or "session <name>" → use that exact name.
@@ -101,9 +150,76 @@ From the user's `/mykg <free text>` message extract:
    6. **Reuse required but missing.** If rules 2/3/4 fire but no session exists under `$SESSIONS_DIR`, fail clearly: `"No existing sessions under <SESSIONS_DIR>. Run /mykg extract <dir> first to create one."`
 
 **Never auto-detect-most-recent purely because a previous skill turn produced a session.** The previous-turn memory only matters when the *current* user message also contains one of the explicit signals in rules 1-4. A bare `/mykg ./more_docs` after a prior session must still create a fresh session.
-4. **Flags** — anything the user named that maps to a flag the cached `--help` confirms (`--review`, `--append`, `--from-step <step>`, `--workers <N>`, `--obsidian-vault`, `--base-schema`, `--thesaurus`, `--verbose`, `--confidence-agg`, etc.). Forward verbatim.
+4. **Flags** — anything the user named that maps to a flag the cached `--help` confirms (`--review`, `--append`, `--from-step <step>`, `--workers <N>`, `--obsidian-vault`, `--base-schema`, `--freeze-schema`, `--thesaurus`, `--verbose`, `--confidence-agg`, `--append-with-grow-schema`, etc.). Forward verbatim.
 
 `extract-graph` without `--append` or `--from-step` does not need a pre-existing session — it auto-creates one.
+
+### `--append-with-grow-schema` — expanding the schema incrementally (D52)
+
+**Use case:** you have an existing session with an induced schema (e.g. Project, Person, Organization) and you add new documents that introduce entity types or relationships the current schema doesn't cover (e.g. a tech-stack document that describes technologies). Plain `--append` freezes the schema — Pass 1 is skipped, so new concept types and properties are never induced, and the new documents are extracted against the old vocabulary. `--append-with-grow-schema` solves this: it implies `--append` and runs a **locked Pass 1** over the changed files only, allowing the LLM to propose new concepts and properties while preserving everything already in the schema.
+
+**How it works:**
+1. The session's existing `schema.ttl` is auto-loaded as a locked base schema — existing classes and properties cannot be renamed, removed, or re-parented.
+2. Pass 1 runs over **only the changed files** (not the whole corpus), so cost is O(changed files).
+3. The LLM may add new concepts, new properties, or new attributes to existing types. It cannot modify locked entries.
+4. Pass 2 extracts the new files against the grown schema. If new properties were added, a **surgical back-fill** may re-extract old chunks that contain nodes of the new properties' domain/range types (configurable via `append.grow_schema_backfill_top_k_chunks_per_type`, default 10; set 0 to disable).
+5. All downstream steps (assemble, orphan pass, validate) re-run over the full corpus so the graph stays consistent.
+
+**When the schema delta is empty** (the new documents don't introduce new types), the run collapses to a plain `--append` — no wasted LLM cost.
+
+**Intent triggers** — use `--append-with-grow-schema` when the user says any of: "grow schema", "expand schema", "grow the schema", "expand the vocabulary", "add new types", "learn new concepts from", "update the schema with". The flag implies `--append` (no need to pass both). `--append-with-grow-schema` is mutually exclusive with `--from-step` and `--base-schema`.
+
+**Confirmation note:** in Stage 2, mention that locked Pass 1 will run (costs LLM calls) vs plain `--append` which skips Pass 1:
+
+```
+About to run: uv run mykg extract-graph ./docs --append-with-grow-schema --session 2026-06-21T11-22-38
+
+This will run a locked Pass 1 over the new files (LLM calls) to expand the schema,
+then extract. Plain --append would skip Pass 1 and keep the schema frozen.
+
+Reply "yes" to run, or "just append" to skip schema growth.
+```
+
+### `--freeze-schema` — bring-your-own-schema extraction
+
+**Use case:** you have a complete ontology (RDFS or OWL TTL) and want the LLM to extract instances against exactly those types — no LLM-invented concepts, no surprise properties. Pass 1 is skipped entirely, saving 3 LLM calls.
+
+```bash
+mykg extract-graph ./docs --base-schema ontology.ttl --freeze-schema
+```
+
+**Rules:**
+- `--freeze-schema` requires `--base-schema <path>`. If the user says "freeze schema" without providing a TTL file, ask for it.
+- Mutually exclusive with `--append` and `--append-with-grow-schema`.
+- The output graph will only contain the concept types and relationship properties declared in the TTL — nothing else.
+
+**Intent triggers** — use `--freeze-schema` when the user says any of: "freeze schema", "frozen schema", "use this schema exactly", "no LLM schema", "skip schema induction", "extract with my ontology only", "strict schema", "use only my types". Always pair with `--base-schema`.
+
+### `fetch-web` flags and special cases
+
+`fetch-web` is a **no-session** verb, same category as `parse-docs` — Stage 1
+item 3's session-resolution logic never fires for it. Forward `--url-list`,
+`--output`, `--max-pages`, `--max-depth`, `--strategy`,
+`--download-assets`/`--no-download-assets`, `--delay`, `--concurrency`,
+`--no-robots`, `--force`, `-v`/`--verbose` verbatim when the user names them,
+validated against `$FETCH_HELP`.
+
+**`--output`:** when the user names a destination folder ("into ./X", "save to
+./X", "output ./X"), pass `--output ./X` verbatim — do not rewrite or
+normalize the path beyond what the user typed. When the user doesn't name one
+and the intent is single-seed, omit `--output` and let the CLI default
+(`./mykg_web_fetch/<domain>/`) apply. For `--url-list` (including the
+inline-tempfile case below), `--output` is **required** by the CLI — if the
+user didn't name one, default to `./mykg_web_fetch/batch`.
+
+**Inline URL list → temp file.** If the user pastes multiple URLs directly in
+the message (not a path to an existing file), `--url-list` can't be used
+as-is — it requires a file. Write each URL on its own line to `mykg_urls.txt`
+(cwd), one URL per line, no comments/blank lines needed since the skill
+controls the content, then pass `--url-list mykg_urls.txt`. Mention the temp
+file's path to the user in the Stage 5 report so they know it was created (it
+is not auto-deleted — leaving it is harmless and lets the user re-run/edit the
+list).
 
 ### Special `--from-step` values for the orphan-connect step
 
@@ -186,7 +302,33 @@ About to run: uv run mykg extract-graph ./docs --append --session 2026-06-02T17-
 Reply "yes" to run, or correct me.
 ```
 
-For obviously safe actions (`walkthrough`, `parse-docs`), skip the confirmation and run.
+For obviously safe actions (`walkthrough`, `parse-docs`, `fetch-web`), skip the confirmation and run.
+
+**`fetch-web` chained with `extract-graph`:** when the user's intent is "fetch
+and extract" (single seed or `--url-list`), run `fetch-web` directly (no
+confirmation — same as above), then confirm once before the `extract-graph`
+step(s), since those are the expensive/LLM-bearing part:
+
+```
+Fetched → <output dir> (N pages / GitHub clone).
+About to run: uv run mykg extract-graph <output dir>  (fresh session)
+
+Reply "yes" to extract, or "no" to stop here.
+```
+
+For the **multi-seed chained intent** (`--url-list`, including the
+inline-URL-list-to-tempfile case), confirm once listing every per-seed subdir
+that will get its own `extract-graph` run:
+
+```
+Fetched 3 seeds → ./mykg_web_fetch/batch/{a.com, b.com, github.com_owner_repo/input}
+About to run, one fresh session each:
+  uv run mykg extract-graph ./mykg_web_fetch/batch/a.com
+  uv run mykg extract-graph ./mykg_web_fetch/batch/b.com
+  uv run mykg extract-graph ./mykg_web_fetch/batch/github.com_owner_repo/input
+
+Reply "yes" to extract all, "no" to stop here, or name which ones to run.
+```
 
 **Fresh-vs-reuse ambiguity:** when the user's intent is plausibly either a fresh extract or a continuation of a recent session (e.g. they typed `/mykg ./more_docs` and a session exists from earlier today), the proposed command MUST use a fresh session (no `--session`). Surface the alternative explicitly in the confirmation line so the user can correct it in one word:
 
@@ -314,7 +456,7 @@ Track the wave count yourself. After 20 waves, tell the user:
 
 > Watch budget exhausted after 20 waves. Pipeline is still running (PID `$MYKG_PID`). Re-invoke `/mykg resume the last session` (or `/mykg --session <name> --continue`) to keep draining the inbox.
 
-### Stage 4b — synchronous path (`walkthrough`, `approve-schema`, `parse-docs`)
+### Stage 4b — synchronous path (`walkthrough`, `approve-schema`, `parse-docs`, `fetch-web`)
 
 These subcommands do not write to the inbox. Run them in the foreground and report the resulting file path.
 
@@ -339,7 +481,54 @@ uv run mykg parse-docs $ARGS
 echo "Converted markdown under: $OUTPUT_DIR"
 ```
 
+**`fetch-web`:**
+
+```bash
+uv run mykg fetch-web $ARGS
+# Single-seed: output ends with "Next: mykg extract-graph <path>" — capture <path>.
+# Multi-seed (--url-list): read fetch_manifest.json["seeds"][*]["output_subdir"]
+# under --output to get one <path> per seed.
+```
+
+Report the printed output directory (or all per-seed subdirs, for
+`--url-list`) and page/asset counts to the user. If the user's intent was the
+chained "fetch and extract" form (see Stage 1 intent table), proceed to Stage
+4a for each captured path (`extract-graph <path>`, fresh session per path,
+after the Stage 2 confirmation) using the captured path(s) as `INPUT_DIR`.
+
 Capture stdout/stderr; surface any non-zero exit to the user verbatim.
+
+### Stage 4b2 — MCP server path (`mcp-serve`)
+
+MCP server commands are synchronous — run in the foreground and report.
+
+**Start:**
+
+```bash
+uv run mykg mcp-serve $ARGS
+```
+
+This blocks — the server runs until stopped. For streamable HTTP, the
+server writes a PID file to `~/.mykg/mcp-serve.pid`. Report the transport
+and port to the user.
+
+**Stop:**
+
+```bash
+uv run mykg mcp-serve --stop
+```
+
+Reports whether the server was stopped or was not running.
+
+**Status:**
+
+```bash
+ps aux | grep "mcp-serve" | grep -v grep
+```
+
+Report whether a server is running and on which transport/port.
+
+No confirmation needed — MCP server commands are safe (no LLM cost, no data writes).
 
 ### Stage 4c — refused (`init`, `merge-graphs`)
 
@@ -348,11 +537,44 @@ Capture stdout/stderr; surface any non-zero exit to the user verbatim.
 
 Do not dispatch anything.
 
-### Stage 4d — read-only file-read path (`query`)
+### Stage 4d — read-only query path (`query`)
 
-No CLI call, no subprocess, no LLM call from inside the skill. The skill reads files from the target session (latest unless the user named one) directly, places the relevant content into context, and lets the host LLM answer the user's question from that material.
+No CLI call, no subprocess, no LLM call from inside the skill. The skill answers the user's question using the target session's graph data (latest unless the user named one).
 
-**Routing — vault vs. jsonl**
+#### Source-attribution discipline — NO training-data contamination
+
+**Every claim in a query answer must be traceable to a specific session artifact** (a node ID, an edge record, a vault note filename, an MCP tool response). If the session data does not contain the information, **say so** — do not fill gaps with your training knowledge.
+
+Concrete rules:
+
+1. **Never state a fact about the domain unless the session data supports it.** If the graph has Owen Lars with two edges (`located_at Tatooine`, `member_of Jedi Knight`), report exactly those two edges. Do not add "Owen is Luke's uncle" or "he was a moisture farmer" — those facts are not in the graph.
+2. **Never judge correctness of graph data using training knowledge.** Do not say an edge is "correct" or "incorrect" based on what you know from pre-training. You may say an edge has confidence 0.0 (that is a graph fact), but not that the edge is "wrong because Owen was never a Jedi" (that is training-data reasoning).
+3. **Never list "missing relationships" sourced from training data.** If the user asks "what's missing?", answer only from what the graph *does* contain and what structural signals suggest (orphan status, low confidence, absent attributes). Do not invent expected relationships from general knowledge.
+4. **If you must use training data, label it explicitly.** Occasionally the user asks a question that genuinely requires outside knowledge (e.g., "is this graph accurate?"). In that case, separate the answer into two clearly labelled sections:
+
+   ```
+   **From the graph (session <name>):**
+   <facts with node IDs, edge types, confidence scores, source files>
+
+   **From training data (not in the graph — may be inaccurate):**
+   <any claims sourced from pre-training, with a caveat>
+   ```
+
+   The graph section always comes first. The training-data section must carry the caveat that it may be inaccurate or outdated. If the user did not ask for an accuracy judgment, **omit the training-data section entirely**.
+
+5. **Cite sources for every fact.** Every claim must end with a parenthetical citation: a node ID (`person-owen-lars`), an edge record (`located_at, confidence 1.0, method: orphan_inferred`), a vault note filename (`Owen Lars.md`), or an MCP tool call name. No uncited claims.
+
+**This rule is non-negotiable.** It is better to give a short, accurate, graph-only answer than a rich answer contaminated with ungrounded training-data assertions.
+
+**Routing priority: MCP first, then file-read, then the `mykg query` CLI as a last resort.**
+
+If `mcp__mykg__*` tools are available in the current session (configured via `.mcp.json`), use them to answer the query. The MCP tools are indexed, return structured JSON, and support graph algorithms (shortest path, hub analysis, traversal, subgraph filtering) that manual file reading cannot do. Pick whichever MCP tool fits the question — the tool names and descriptions are self-documenting.
+
+If MCP tools are not available or the call fails, fall back to reading session files directly as described below.
+
+There is also a terminal command `mykg query "<question>" [--session NAME] [--mode bfs|dfs] [--depth N] [--token-budget N]` that mirrors the MCP `mykg_query_graph` tool: it finds seed nodes matching the question, traverses the graph, and prints a bounded text context of nodes plus relationships. Treat it as a **last-resort fallback** — reach for it only when MCP tools are unavailable *and* the raw session files are too large to read comfortably (e.g. a >50k-edge graph where the jsonl-path guidance below already suggests dropping into Python). It runs on the latest completed session unless `--session` is passed. Because its output is a pre-bundled summary rather than the raw node/edge records, it is **weaker for citation**: when you answer from it, still cite the specific node IDs and edge records it names (they appear in the text block as `(node-id)` and `from-id --[type]--> to-id`), and never let its summarization substitute for the source-attribution discipline above. Prefer MCP or raw file-reads whenever feasible.
+
+**File-read fallback — vault vs. jsonl**
 
 Pick the read source from the wording of the user's question:
 
@@ -445,9 +667,10 @@ Use the jsonl path to identify the target node(s), then resolve `<node>.md` in t
 
 **Confirmation behaviour**
 
-`query` is read-only and free, so **do not** ask the user to confirm. Just run it. Do echo a one-line summary of what was read before answering:
+`query` is read-only and free, so **do not** ask the user to confirm. Just run it. Do echo a one-line summary of the path used before answering:
 
 ```
+[query] MCP: answered via 2 MCP tool calls.
 [query] vault: read 3 notes from $VAULT (Alice.md, AcmeCorp.md, Project_Phoenix.md).
 [query] jsonl: read 47 nodes + 89 edges from $SESSION_ROOT/output/.
 ```

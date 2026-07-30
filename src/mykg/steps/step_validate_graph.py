@@ -18,9 +18,7 @@ def run_validate_graph(ctx: PipelineContext) -> None:
         nodes = json.loads((ctx.intermediate_dir / "nodes.json").read_text(encoding="utf-8"))
     edge_metadata = ctx.edge_metadata
     if edge_metadata is None:
-        edge_metadata = json.loads(
-            (ctx.intermediate_dir / "edge_metadata.json").read_text(encoding="utf-8")
-        )
+        edge_metadata = json.loads((ctx.intermediate_dir / "edge_metadata.json").read_text(encoding="utf-8"))
     log.info("Steps 10–12 — validating and writing graph outputs …")
     declared_props = {p["name"] for p in schema.get("properties", [])}
     valid_edge_metadata = {
@@ -30,9 +28,7 @@ def run_validate_graph(ctx: PipelineContext) -> None:
     result = validate_knowledge_graph_ttl(ttl)
 
     (ctx.output_dir / "nodes.jsonl").write_text(export_nodes_jsonl(nodes), encoding="utf-8")
-    (ctx.output_dir / "edges.jsonl").write_text(
-        export_edges_jsonl(valid_edge_metadata), encoding="utf-8"
-    )
+    (ctx.output_dir / "edges.jsonl").write_text(export_edges_jsonl(valid_edge_metadata), encoding="utf-8")
     (ctx.output_dir / "knowledge_graph.ttl").write_text(ttl, encoding="utf-8")
 
     if _cfg.NETWORKX_ENABLED:

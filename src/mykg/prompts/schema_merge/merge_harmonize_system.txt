@@ -33,6 +33,13 @@ D. UNIFY ATTRIBUTE NAMING
    prefer "date" over "incident_date", "name" over "title" when both appear at the same
    level of the hierarchy.
 
+GROUNDING
+=========
+All concepts and properties in your output must be derivable from the input session
+schemas. Do not introduce new types, properties, or attributes from your training data
+or world knowledge. Harmonization means collapsing and renaming what already exists —
+not adding what you think should exist.
+
 STRICT RULES
 ============
 - Return ONLY valid JSON with keys "concepts" and "properties". No markdown. No explanation.
@@ -42,6 +49,9 @@ STRICT RULES
   Every concept must have at least "name".
 - Do NOT add a "Relationship" class.
 - Do NOT invent new concepts or properties not derivable from the input.
+- PRESERVE IDENTITY-LINKING PROPERTIES — do not collapse properties like "same_as",
+  "alias_of", or "became" into other relationship types. These link alter-ego /
+  identity-split entities and are semantically distinct from general relationships.
 - NEVER drop an attribute that appeared on a concept in either session schema or in the
   merged schema. The attribute union is the ground truth — your only permitted changes to
   attributes are: renaming for consistency (rule D above), or adding "name" when it is

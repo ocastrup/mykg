@@ -125,7 +125,7 @@ def run_merge(ctx: MergeContext) -> None:
             state.save(ctx.intermediate_dir)
 
             try:
-                error = _try_run(step, ctx)
+                error, non_retryable = _try_run(step, ctx)
             except (KeyboardInterrupt, SystemExit) as exc:
                 state.mark_failed(step.name, repr(exc), attempts=1, llm_correction=False)
                 state.save(ctx.intermediate_dir)
@@ -184,9 +184,9 @@ def run_merge(ctx: MergeContext) -> None:
 
                     from mykg.exporter import export_ttl as _export_ttl
 
-                    _updated_schema = json.loads(_schema_json_path.read_text())
+                    _updated_schema = json.loads(_schema_json_path.read_text(encoding="utf-8"))
                     _ttl_text = _export_ttl(_updated_schema, [], {})
-                    (ctx.intermediate_dir / "schema.ttl").write_text(_ttl_text)
+                    (ctx.intermediate_dir / "schema.ttl").write_text(_ttl_text, encoding="utf-8")
                     log.info(
                         "Schema-gap restart — regenerated schema.ttl "
                         "(%d concept(s), %d property/properties)",
@@ -205,21 +205,34 @@ def run_merge(ctx: MergeContext) -> None:
                 schema_restart_triggered = True
                 break  # restart the for-loop via the outer while
 
-            if error:
+            if error and non_retryable:
+                log.warning(
+                    "PRECONDITION FAILED %s — %s (skipping retry and LLM feedback; "
+                    "this is a usage/precondition error, not a transient or content error)",
+                    step.name,
+                    error,
+                )
+
+            if error and not non_retryable:
                 log.warning("RETRY %s — attempt 1 failed: %s", step.name, error)
-                error = _try_run(step, ctx)
+                error, non_retryable = _try_run(step, ctx)
 
             llm_correction = False
-            if error and step.is_llm_step:
+            if error and not non_retryable and step.is_llm_step:
                 log.warning("FEEDBACK %s — requesting LLM correction", step.name)
                 try:
                     llm_correction = feedback.apply(step.name, error, ctx)
                 except Exception as fb_exc:
                     log.warning("Feedback handler failed: %s", fb_exc)
-                error = _try_run(step, ctx)
+                error, non_retryable = _try_run(step, ctx)
 
             if error:
-                attempts = 3 if (step.is_llm_step and llm_correction) else 2
+                if non_retryable:
+                    attempts = 1
+                elif step.is_llm_step and llm_correction:
+                    attempts = 3
+                else:
+                    attempts = 2
                 state.mark_failed(
                     step.name, error, attempts=attempts, llm_correction=llm_correction
                 )

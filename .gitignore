@@ -29,6 +29,9 @@ kg_sessions/
 .coverage
 htmlcov
 CLAUDE.md
+storage/
+fetched_web/
+mykg_web_fetch/
 
 # Exception: keep the bundled demo session under docs/examples/ tracked
 !docs/examples/**
