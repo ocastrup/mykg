@@ -12,7 +12,6 @@ profile: agent-claude-code
 # ---------------------------------------------------------------------------
 paths:
   sessions_root: 'C:\Users\oca\DNV\Yards - Documents\test-wiki\kg_sessions'   # parent for per-run session dirs (each run = timestamped subfolder)
-  wiki_root: 'C:\Users\oca\DNV\Yards - Documents\test-wiki\kg_wiki'           # build-wiki output: each session's wiki -> <wiki_root>/<session-name>/
 
 # ---------------------------------------------------------------------------
 # Watch — per-session folder triggers. Top-level (profile-independent).
@@ -186,17 +185,6 @@ profiles:
         obsidian_vault_dir: obsidian_vault  # subdirectory under output/ for the Obsidian vault
         neo4j_csv_enabled: false    # write Neo4j LOAD CSV bundle to output/neo4j_csv/ (CSVs + browser/cypher-shell scripts + README)
         neo4j_csv_dir: neo4j_csv    # subdirectory under output/ for the Neo4j LOAD CSV bundle
-      wiki:
-        max_workers: 4
-        min_attr_confidence: 0.3    # drop attributes below this from the LLM prompt
-        min_edge_confidence: 0.3    # drop links (and neighbor context) below this
-        max_grounding_tokens: 4000  # cap source-chunk text fed per page
-        neighbors_max: 25           # cap 1-hop neighbor list per page
-      topics:
-        resolution: 1.0     # greedy-modularity resolution (higher -> more, smaller communities)
-        min_size: 3         # communities smaller than this get no topic page
-        members_max: 25     # max members grounded into a topic prompt
-        enabled: true       # reserved gate; build-topics is already opt-in via the command
       # --- Pipeline infrastructure --------------------------------------------
       error_gate:               # circuit-breaker: pauses the run when too many API errors accumulate
         enabled: false          # set false for fully unattended runs (e.g. providers with no rate limits)
@@ -371,17 +359,6 @@ profiles:
         obsidian_vault_dir: obsidian_vault
         neo4j_csv_enabled: false
         neo4j_csv_dir: neo4j_csv
-      wiki:
-        max_workers: 4
-        min_attr_confidence: 0.3    # drop attributes below this from the LLM prompt
-        min_edge_confidence: 0.3    # drop links (and neighbor context) below this
-        max_grounding_tokens: 4000  # cap source-chunk text fed per page
-        neighbors_max: 25           # cap 1-hop neighbor list per page
-      topics:
-        resolution: 1.0     # greedy-modularity resolution (higher -> more, smaller communities)
-        min_size: 3         # communities smaller than this get no topic page
-        members_max: 25     # max members grounded into a topic prompt
-        enabled: true       # reserved gate; build-topics is already opt-in via the command
       # --- Pipeline infrastructure --------------------------------------------
       error_gate:
         enabled: false
@@ -555,17 +532,6 @@ profiles:
         obsidian_vault_dir: obsidian_vault  # subdirectory under output/ for the Obsidian vault
         neo4j_csv_enabled: false    # write Neo4j LOAD CSV bundle to output/neo4j_csv/ (CSVs + browser/cypher-shell scripts + README)
         neo4j_csv_dir: neo4j_csv    # subdirectory under output/ for the Neo4j LOAD CSV bundle
-      wiki:
-        max_workers: 4
-        min_attr_confidence: 0.3    # drop attributes below this from the LLM prompt
-        min_edge_confidence: 0.3    # drop links (and neighbor context) below this
-        max_grounding_tokens: 4000  # cap source-chunk text fed per page
-        neighbors_max: 25           # cap 1-hop neighbor list per page
-      topics:
-        resolution: 1.0     # greedy-modularity resolution (higher -> more, smaller communities)
-        min_size: 3         # communities smaller than this get no topic page
-        members_max: 25     # max members grounded into a topic prompt
-        enabled: true       # reserved gate; build-topics is already opt-in via the command
       # --- Pipeline infrastructure --------------------------------------------
       error_gate:               # circuit-breaker: pauses the run when too many API errors accumulate
         enabled: false
@@ -746,17 +712,6 @@ profiles:
         obsidian_vault_dir: obsidian_vault
         neo4j_csv_enabled: false
         neo4j_csv_dir: neo4j_csv
-      wiki:
-        max_workers: 4
-        min_attr_confidence: 0.3    # drop attributes below this from the LLM prompt
-        min_edge_confidence: 0.3    # drop links (and neighbor context) below this
-        max_grounding_tokens: 4000  # cap source-chunk text fed per page
-        neighbors_max: 25           # cap 1-hop neighbor list per page
-      topics:
-        resolution: 1.0     # greedy-modularity resolution (higher -> more, smaller communities)
-        min_size: 3         # communities smaller than this get no topic page
-        members_max: 25     # max members grounded into a topic prompt
-        enabled: true       # reserved gate; build-topics is already opt-in via the command
       # --- Pipeline infrastructure --------------------------------------------
       error_gate:
         enabled: false
@@ -931,17 +886,6 @@ profiles:
         obsidian_vault_dir: obsidian_vault
         neo4j_csv_enabled: false
         neo4j_csv_dir: neo4j_csv
-      wiki:
-        max_workers: 4
-        min_attr_confidence: 0.3    # drop attributes below this from the LLM prompt
-        min_edge_confidence: 0.3    # drop links (and neighbor context) below this
-        max_grounding_tokens: 4000  # cap source-chunk text fed per page
-        neighbors_max: 25           # cap 1-hop neighbor list per page
-      topics:
-        resolution: 1.0     # greedy-modularity resolution (higher -> more, smaller communities)
-        min_size: 3         # communities smaller than this get no topic page
-        members_max: 25     # max members grounded into a topic prompt
-        enabled: true       # reserved gate; build-topics is already opt-in via the command
       # --- Pipeline infrastructure --------------------------------------------
       error_gate:
         enabled: false
@@ -1106,17 +1050,6 @@ profiles:
         obsidian_vault_dir: obsidian_vault
         neo4j_csv_enabled: false
         neo4j_csv_dir: neo4j_csv
-      wiki:
-        max_workers: 4
-        min_attr_confidence: 0.3    # drop attributes below this from the LLM prompt
-        min_edge_confidence: 0.3    # drop links (and neighbor context) below this
-        max_grounding_tokens: 4000  # cap source-chunk text fed per page
-        neighbors_max: 25           # cap 1-hop neighbor list per page
-      topics:
-        resolution: 1.0     # greedy-modularity resolution (higher -> more, smaller communities)
-        min_size: 3         # communities smaller than this get no topic page
-        members_max: 25     # max members grounded into a topic prompt
-        enabled: true       # reserved gate; build-topics is already opt-in via the command
       # --- Pipeline infrastructure --------------------------------------------
       error_gate:
         enabled: false
@@ -1276,17 +1209,6 @@ profiles:
         obsidian_vault_dir: /Users/oca/Documents/MyKG/obsidian_vault  # absolute path — vault lives outside the session folder
         neo4j_csv_enabled: false
         neo4j_csv_dir: neo4j_csv
-      wiki:
-        max_workers: 4
-        min_attr_confidence: 0.3    # drop attributes below this from the LLM prompt
-        min_edge_confidence: 0.3    # drop links (and neighbor context) below this
-        max_grounding_tokens: 4000  # cap source-chunk text fed per page
-        neighbors_max: 25           # cap 1-hop neighbor list per page
-      topics:
-        resolution: 1.0     # greedy-modularity resolution (higher -> more, smaller communities)
-        min_size: 3         # communities smaller than this get no topic page
-        members_max: 25     # max members grounded into a topic prompt
-        enabled: true       # reserved gate; build-topics is already opt-in via the command
       error_gate:
         enabled: false
         threshold: 3

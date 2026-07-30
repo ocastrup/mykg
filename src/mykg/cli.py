@@ -2030,8 +2030,8 @@ def query(question, session, mode, depth, token_budget):
 
 
 # ---------------------------------------------------------------------------
-# Fork-local subcommands (watch / build-wiki / build-topics). Owned by
-# cli_ext.py so upstream syncs don't collide on this file.
+# Fork-local subcommands (watch). Owned by cli_ext.py so upstream syncs don't
+# collide on this file.
 # ---------------------------------------------------------------------------
 from mykg.cli_ext import register as _register_fork_commands  # noqa: E402
 
