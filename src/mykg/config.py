@@ -208,19 +208,6 @@ OBSIDIAN_VAULT_DIR: str = _get_opt("export", "obsidian_vault_dir", "obsidian_vau
 NEO4J_CSV_ENABLED: bool = _get_opt("export", "neo4j_csv_enabled", False)
 NEO4J_CSV_DIR: str = _get_opt("export", "neo4j_csv_dir", "neo4j_csv")
 
-# Wiki (build-wiki command) — optional; defaults apply when a profile omits `wiki:`
-WIKI_MAX_WORKERS: int = int(_get_opt("wiki", "max_workers", 4))
-WIKI_MIN_ATTR_CONFIDENCE: float = float(_get_opt("wiki", "min_attr_confidence", 0.3))
-WIKI_MIN_EDGE_CONFIDENCE: float = float(_get_opt("wiki", "min_edge_confidence", 0.3))
-WIKI_MAX_GROUNDING_TOKENS: int = int(_get_opt("wiki", "max_grounding_tokens", 4000))
-WIKI_NEIGHBORS_MAX: int = int(_get_opt("wiki", "neighbors_max", 25))
-
-# Topics (build-topics command) — optional; defaults apply when a profile omits `topics:`
-TOPICS_RESOLUTION: float = float(_get_opt("topics", "resolution", 1.0))
-TOPICS_MIN_SIZE: int = int(_get_opt("topics", "min_size", 3))
-TOPICS_MEMBERS_MAX: int = int(_get_opt("topics", "members_max", 25))
-TOPICS_ENABLED: bool = bool(_get_opt("topics", "enabled", True))
-
 # ---------------------------------------------------------------------------
 # Output / intermediate paths (D16, D18)
 # ---------------------------------------------------------------------------
@@ -231,18 +218,15 @@ INTERMEDIATE_DIR: str = _get("paths", "intermediate_dir")
 # active profile (switching `profile:` never changes where your data lives).
 _user_paths = RAW["paths"]
 SESSIONS_DIR: str = _user_paths["sessions_root"]
-WIKI_ROOT: str = _user_paths["wiki_root"]
 
 # ---------------------------------------------------------------------------
-# Watch — top-level `watch:` block (profile-independent). Defaults applied here
-# so the block's optional keys can be omitted.
+# Fork-local feature config (wiki / topics / watch). Owned by config_ext.py so
+# upstream syncs don't collide on this file. Injected here — rather than
+# imported — so it re-derives on every importlib.reload() profile switch.
 # ---------------------------------------------------------------------------
-_watch = RAW.get("watch", {}) or {}
-WATCH_POLL_INTERVAL_SECONDS: int = int(_watch.get("poll_interval_seconds", 300))
-WATCH_DEBOUNCE_SECONDS: int = int(_watch.get("debounce_seconds", 600))
-WATCH_QUEUE_DIR: str = str(_watch.get("queue_dir", "_watch_queue"))
-WATCH_AUTOPILOT: bool = bool(_watch.get("autopilot", False))
-WATCH_ENTRIES: list = list(_watch.get("entries", []) or [])
+from mykg import config_ext as _config_ext  # noqa: E402
+
+globals().update(_config_ext.derive(_get_opt, RAW, _user_paths))
 
 # ---------------------------------------------------------------------------
 # Name normalization — Step 6b (D29)
