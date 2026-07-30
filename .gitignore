@@ -35,6 +35,8 @@ mykg_web_fetch/
 
 # Exception: keep the bundled demo session under docs/examples/ tracked
 !docs/examples/**
+# ...but never track compiled Python caches under it
+docs/examples/**/__pycache__/
 
 # Exception: keep test fixtures tracked even though they use output/ and intermediate/ subdirs
 !tests/fixtures/**
