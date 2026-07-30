@@ -136,9 +136,9 @@ def test_committed_ttl_matches_generator(m):
     # The committed artifact must be exactly what build_ttl() produces —
     # catches a stale checked-in file.
     ttl_path = SCRIPT.parent / "ontokg-base.ttl"
-    assert ttl_path.read_text() == m.build_ttl()
+    assert ttl_path.read_text(encoding="utf-8") == m.build_ttl()
 
 
 def test_committed_mapping_matches_generator(m):
     md_path = SCRIPT.parent / "ontokg-mapping.md"
-    assert md_path.read_text() == m.build_mapping_md()
+    assert md_path.read_text(encoding="utf-8") == m.build_mapping_md()

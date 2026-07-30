@@ -229,7 +229,7 @@ def validate(ttl_path: str | Path = _TTL_PATH) -> dict:
     """Round-trip the TTL through mykg's parse_base_schema and assert structure."""
     from mykg.base_schema import parse_base_schema
 
-    parsed = parse_base_schema(Path(ttl_path).read_text())
+    parsed = parse_base_schema(Path(ttl_path).read_text(encoding="utf-8"))
     lc, lp = parsed["locked_classes"], parsed["locked_properties"]
 
     assert "Entity" in lc, "missing synthetic root :Entity"
@@ -258,8 +258,8 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
 
     if args.generate:
-        _TTL_PATH.write_text(build_ttl())
-        _MD_PATH.write_text(build_mapping_md())
+        _TTL_PATH.write_text(build_ttl(), encoding="utf-8")
+        _MD_PATH.write_text(build_mapping_md(), encoding="utf-8")
         print(f"Wrote {_TTL_PATH.name} and {_MD_PATH.name}.")
     validate()
     return 0
