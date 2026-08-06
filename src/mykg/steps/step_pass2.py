@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 
@@ -15,7 +16,43 @@ log = get("mykg.steps.pass2")
 
 
 def _fname_slug(fname: str) -> str:
-    return fname.replace("/", "_").replace("\\", "_").replace(" ", "_")
+    """Filesystem-safe shard name for *fname*, collision-free across distinct paths.
+
+    A bare replace() would map e.g. "reports/q3.pdf" and "reports_q3.pdf" to the
+    same shard file (last writer wins, silently losing a document), so sanitized
+    names get an 8-hex digest of the original path appended. Names needing no
+    sanitization keep their plain slug, stable across mykg versions.
+    """
+    slug = fname.replace("/", "_").replace("\\", "_").replace(" ", "_")
+    if slug != fname:
+        digest = hashlib.sha1(fname.encode("utf-8")).hexdigest()[:8]
+        slug = f"{slug}.{digest}"
+    return slug
+
+
+def _write_shards(shard_dir, chunk_shard_dir, fname: str, result: dict, file_idx: dict) -> None:
+    """Persist one file's extraction + chunk-index shards under its slug.
+
+    Also removes a stale pre-hash shard for the same *fname* (written by older
+    mykg versions with the bare, collision-prone slug) so the resume glob never
+    sees two shards claiming the same document.
+    """
+    slug = _fname_slug(fname)
+    legacy = fname.replace("/", "_").replace("\\", "_").replace(" ", "_")
+    for directory, data in ((shard_dir, result), (chunk_shard_dir, file_idx)):
+        if legacy != slug:
+            legacy_path = directory / f"{legacy}.json"
+            if legacy_path.exists():
+                try:
+                    stale = json.loads(legacy_path.read_text(encoding="utf-8"))
+                    if stale.get("_fname") == fname:
+                        legacy_path.unlink()
+                except (json.JSONDecodeError, OSError):
+                    pass
+        (directory / f"{slug}.json").write_text(
+            json.dumps({"_fname": fname, "data": data}, indent=_cfg.JSON_INDENT),
+            encoding="utf-8",
+        )
 
 
 def run_schema_flatten(ctx: PipelineContext) -> None:
@@ -142,15 +179,7 @@ def _run(
             def _on_file_done_surgical(fname: str, result: dict, file_idx: dict) -> None:
                 existing_raw[fname] = result
                 existing_chunk[fname] = file_idx
-                slug = _fname_slug(fname)
-                (shard_dir / f"{slug}.json").write_text(
-                    json.dumps({"_fname": fname, "data": result}, indent=_cfg.JSON_INDENT),
-                    encoding="utf-8",
-                )
-                (chunk_shard_dir / f"{slug}.json").write_text(
-                    json.dumps({"_fname": fname, "data": file_idx}, indent=_cfg.JSON_INDENT),
-                    encoding="utf-8",
-                )
+                _write_shards(shard_dir, chunk_shard_dir, fname, result, file_idx)
 
             new_raw, new_chunk, _failed = run_pass2(
                 affected,
@@ -186,15 +215,7 @@ def _run(
     chunk_shard_dir.mkdir(exist_ok=True)
 
     def _write_shard(fname: str, result: dict, file_idx: dict) -> None:
-        slug = _fname_slug(fname)
-        (shard_dir / f"{slug}.json").write_text(
-            json.dumps({"_fname": fname, "data": result}, indent=_cfg.JSON_INDENT),
-            encoding="utf-8",
-        )
-        (chunk_shard_dir / f"{slug}.json").write_text(
-            json.dumps({"_fname": fname, "data": file_idx}, indent=_cfg.JSON_INDENT),
-            encoding="utf-8",
-        )
+        _write_shards(shard_dir, chunk_shard_dir, fname, result, file_idx)
 
     def _on_file_done(fname: str, result: dict, file_idx: dict) -> None:
         existing_raw[fname] = result
@@ -410,15 +431,7 @@ def _grow_schema_backfill(
     def _on_file_done_backfill(fname: str, result: dict, file_idx: dict) -> None:
         existing_raw[fname] = result
         existing_chunk[fname] = file_idx
-        slug = _fname_slug(fname)
-        (shard_dir / f"{slug}.json").write_text(
-            json.dumps({"_fname": fname, "data": result}, indent=_cfg.JSON_INDENT),
-            encoding="utf-8",
-        )
-        (chunk_shard_dir / f"{slug}.json").write_text(
-            json.dumps({"_fname": fname, "data": file_idx}, indent=_cfg.JSON_INDENT),
-            encoding="utf-8",
-        )
+        _write_shards(shard_dir, chunk_shard_dir, fname, result, file_idx)
 
     new_raw, new_chunk, _failed = run_pass2(
         affected,

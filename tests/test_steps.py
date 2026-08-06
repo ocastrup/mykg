@@ -632,6 +632,70 @@ def test_shards_loaded_on_restart(tmp_path):
     assert "b.md" in merged
 
 
+def test_fname_slug_distinct_paths_never_collide():
+    """reports/q3.pdf, reports\\q3.pdf and reports_q3.pdf get distinct shard names."""
+    slugs = {
+        _fname_slug("reports/q3.pdf"),
+        _fname_slug("reports\\q3.pdf"),
+        _fname_slug("reports q3.pdf"),
+        _fname_slug("reports_q3.pdf"),
+    }
+    assert len(slugs) == 4
+    # Plain names keep their historical slug so old sessions still resume cleanly.
+    assert _fname_slug("reports_q3.pdf") == "reports_q3.pdf"
+    for slug in slugs:
+        assert "/" not in slug and "\\" not in slug and " " not in slug
+
+
+def test_shards_for_colliding_fnames_coexist_on_disk(tmp_path, monkeypatch):
+    """Two documents whose names sanitize identically both survive a run (no last-writer-wins)."""
+    import mykg.config as cfg
+
+    monkeypatch.setattr(cfg, "PASS2_PREP_MODE", "per_file")
+    adapter = MagicMock()
+    adapter.complete.return_value = MOCK_EXTRACTION
+
+    ctx = _make_ctx(tmp_path, adapter)
+    ctx.file_contents = {"reports/q3.pdf": "Alice at Acme.", "reports_q3.pdf": "Bob at Beta."}
+    (ctx.intermediate_dir / "schema.json").write_text(json.dumps(SCHEMA))
+    (ctx.intermediate_dir / "flattened_schema.json").write_text(json.dumps({"Person": ["name"]}))
+
+    run_pass2_step(ctx)
+
+    shard_dir = ctx.intermediate_dir / "raw_extractions_shards"
+    fnames = {
+        json.loads(p.read_text())["_fname"] for p in shard_dir.glob("*.json")
+    }
+    assert fnames == {"reports/q3.pdf", "reports_q3.pdf"}
+    merged = json.loads((ctx.intermediate_dir / "raw_extractions.json").read_text())
+    assert set(merged) == {"reports/q3.pdf", "reports_q3.pdf"}
+
+
+def test_write_shards_replaces_stale_legacy_slug(tmp_path):
+    """A pre-hash shard for the same fname is removed; an unrelated same-slug shard survives."""
+    from mykg.steps.step_pass2 import _write_shards
+
+    shard_dir = tmp_path / "raw_extractions_shards"
+    chunk_dir = tmp_path / "chunk_index_shards"
+    shard_dir.mkdir()
+    chunk_dir.mkdir()
+    # Legacy shard written by an older mykg for the *same* document.
+    legacy = shard_dir / "reports_q3.pdf.json"
+    legacy.write_text(json.dumps({"_fname": "reports/q3.pdf", "data": {"old": True}}))
+
+    _write_shards(shard_dir, chunk_dir, "reports/q3.pdf", {"nodes": [], "edges": []}, {})
+
+    assert not legacy.exists()
+    fnames = [json.loads(p.read_text())["_fname"] for p in shard_dir.glob("*.json")]
+    assert fnames == ["reports/q3.pdf"]
+
+    # An unrelated document that legitimately owns the bare slug is left alone.
+    other = shard_dir / "dir_a_x.md.json"
+    other.write_text(json.dumps({"_fname": "dir_a_x.md", "data": {}}))
+    _write_shards(shard_dir, chunk_dir, "dir_a/x.md", {"nodes": [], "edges": []}, {})
+    assert other.exists()
+
+
 def test_backward_compat_monolithic_fallback(tmp_path, monkeypatch):
     """When no shard dir exists, monolithic raw_extractions.json is loaded as fallback."""
     import mykg.config as cfg

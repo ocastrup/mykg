@@ -9,7 +9,7 @@ import pytest
 
 from mykg.llm.adapter import LLMAdapter
 from mykg.orchestrator import PipelineContext
-from mykg.steps.step_pass2 import _load_manifest, run_pass2_step, run_schema_flatten
+from mykg.steps.step_pass2 import _fname_slug, _load_manifest, run_pass2_step, run_schema_flatten
 
 
 class MockAdapter(LLMAdapter):
@@ -318,7 +318,7 @@ def test_concat_fans_out_to_member_shards(tmp_path, monkeypatch):
 
     shard_dir = ctx.intermediate_dir / "raw_extractions_shards"
     names = {p.name for p in shard_dir.glob("*.json")}
-    assert names == {"dir_a.md.json", "dir_b.md.json"}
+    assert names == {f"{_fname_slug('dir/a.md')}.json", f"{_fname_slug('dir/b.md')}.json"}
     for n in names:
         data = json.loads((shard_dir / n).read_text())
         assert data["_fname"].startswith("dir/")
