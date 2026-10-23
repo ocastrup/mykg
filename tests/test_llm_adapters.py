@@ -1,6 +1,7 @@
 import io
 import json
 import os
+import pathlib
 import urllib.error
 from unittest.mock import MagicMock, call, patch
 
@@ -1029,20 +1030,24 @@ def test_openrouter_no_override_uses_constructor_defaults():
 # ---------------------------------------------------------------------------
 
 
-def _load_openrouter_api_key() -> str | None:
-    """Load OPENROUTER_API_KEY from environment or .env file."""
-    key = os.environ.get("OPENROUTER_API_KEY", "").strip()
-    if not key:
-        from pathlib import Path
+def _skip_if_quota_exhausted(exc: BaseException) -> None:
+    """Skip rather than fail when the account is out of quota, not the code.
 
-        env_file = Path(__file__).parent.parent / ".env"
-        if env_file.exists():
-            for line in env_file.read_text().splitlines():
-                if line.startswith("OPENROUTER_API_KEY"):
-                    _, _, val = line.partition("=")
-                    key = val.strip()
-                    break
-    return key or None
+    A live test exists to prove the provider accepts our request shape. A 429
+    for an exhausted free-tier allowance says nothing about that — it reports
+    the state of the account — so failing on it is a false negative that makes
+    the suite unusable on free keys. Genuine rejections (400 on an unsupported
+    parameter, auth errors) still fail loudly.
+    """
+    msg = str(exc).lower()
+    markers = ("resource_exhausted", "exceeded your current quota", "quota exceeded")
+    if any(marker in msg for marker in markers):
+        pytest.skip(f"provider quota exhausted, not a code failure: {str(exc)[:120]}")
+
+
+def _load_openrouter_api_key() -> str | None:
+    """Load OPENROUTER_API_KEY from the environment or .env.mykg."""
+    return _load_api_key("OPENROUTER_AUTH_TOKEN", "OPENROUTER_API_KEY")
 
 
 def test_openrouter_endpoint_label_includes_model_and_base_url():
@@ -1102,8 +1107,7 @@ def test_openrouter_wall_clock_timeout_raises_timeouterror(monkeypatch):
 
     # record_llm_call should have been invoked with the wall-clock error
     found = any(
-        "wall-clock timeout" in str(c.kwargs.get("error", ""))
-        for c in mock_record.call_args_list
+        "wall-clock timeout" in str(c.kwargs.get("error", "")) for c in mock_record.call_args_list
     )
     assert found, "record_llm_call should record the wall-clock timeout error"
 
@@ -1195,9 +1199,14 @@ def test_openrouter_live_call_respects_timeout():
     from mykg.llm.openrouter_adapter import OpenRouterAdapter
 
     # --- normal call: should succeed within a generous timeout ---
+    # openrouter/free routes to whatever free model is currently available. A
+    # reasoning model spends output tokens on thinking, so a 64-token budget
+    # truncates it before any visible text (finish_reason=length) and this
+    # assertion fails intermittently for reasons unrelated to the timeout under
+    # test. The tight-timeout adapter below keeps its small budget on purpose.
     adapter = OpenRouterAdapter(
         model=model,
-        max_tokens=64,
+        max_tokens=2000,
         timeout=120,
         api_key=api_key,
     )
@@ -1309,9 +1318,7 @@ def test_anthropic_adapter_context_exceeded_logs_and_reraises():
             adapter.complete("sys", "user")
 
     call_kwargs_list = [c.kwargs for c in mock_record.call_args_list]
-    assert any(
-        "context_length_exceeded" in str(k.get("error", "")) for k in call_kwargs_list
-    )
+    assert any("context_length_exceeded" in str(k.get("error", "")) for k in call_kwargs_list)
 
 
 def test_openai_adapter_truncated_response_logs_finish_reason():
@@ -1387,9 +1394,7 @@ def test_openai_adapter_context_exceeded_logs_and_reraises():
             adapter.complete("sys", "user")
 
     call_kwargs_list = [c.kwargs for c in mock_record.call_args_list]
-    assert any(
-        "context_length_exceeded" in str(k.get("error", "")) for k in call_kwargs_list
-    )
+    assert any("context_length_exceeded" in str(k.get("error", "")) for k in call_kwargs_list)
 
 
 def test_openrouter_adapter_truncated_response_logs_finish_reason():
@@ -1463,9 +1468,7 @@ def test_openrouter_adapter_context_exceeded_marks_error():
             adapter.complete("s", "u")
 
     call_kwargs_list = [c.kwargs for c in mock_record.call_args_list]
-    assert any(
-        "context_length_exceeded" in str(k.get("error", "")) for k in call_kwargs_list
-    )
+    assert any("context_length_exceeded" in str(k.get("error", "")) for k in call_kwargs_list)
 
 
 def test_ollama_adapter_truncated_response_logs_finish_reason():
@@ -1545,9 +1548,7 @@ def test_ollama_adapter_context_exceeded_http_error_logs_and_reraises():
             adapter.complete("sys", "user")
 
     call_kwargs_list = [c.kwargs for c in mock_record.call_args_list]
-    assert any(
-        "context_length_exceeded" in str(k.get("error", "")) for k in call_kwargs_list
-    )
+    assert any("context_length_exceeded" in str(k.get("error", "")) for k in call_kwargs_list)
 
 
 def test_ollama_adapter_context_exceeded_url_error_logs_and_reraises():
@@ -1563,9 +1564,7 @@ def test_ollama_adapter_context_exceeded_url_error_logs_and_reraises():
             adapter.complete("sys", "user")
 
     call_kwargs_list = [c.kwargs for c in mock_record.call_args_list]
-    assert any(
-        "context_length_exceeded" in str(k.get("error", "")) for k in call_kwargs_list
-    )
+    assert any("context_length_exceeded" in str(k.get("error", "")) for k in call_kwargs_list)
 
 
 def test_ollama_adapter_non_context_url_error_not_logged():
@@ -1606,7 +1605,10 @@ def test_anthropic_truncation_warns_on_standard_logger(caplog):
     truncated_response.content = [truncated_block]
     truncated_response.stop_reason = "max_tokens"
 
-    with patch("anthropic.Anthropic") as mock_cls, caplog.at_level("WARNING", logger="mykg.llm.retry"):
+    with (
+        patch("anthropic.Anthropic") as mock_cls,
+        caplog.at_level("WARNING", logger="mykg.llm.retry"),
+    ):
         mock_client = MagicMock()
         mock_cls.return_value = mock_client
         mock_client.messages.create.return_value = truncated_response
@@ -1630,7 +1632,10 @@ def test_anthropic_normal_completion_emits_no_warning(caplog):
     ok_response.content = [ok_block]
     ok_response.stop_reason = "end_turn"
 
-    with patch("anthropic.Anthropic") as mock_cls, caplog.at_level("WARNING", logger="mykg.llm.retry"):
+    with (
+        patch("anthropic.Anthropic") as mock_cls,
+        caplog.at_level("WARNING", logger="mykg.llm.retry"),
+    ):
         mock_client = MagicMock()
         mock_cls.return_value = mock_client
         mock_client.messages.create.return_value = ok_response
@@ -2042,3 +2047,1987 @@ def test_anthropic_adapter_missing_usage_defaults_all_to_zero():
     assert kwargs.get("output_tokens") == 0
     assert kwargs.get("cache_read_tokens") == 0
     assert kwargs.get("cache_creation_tokens") == 0
+
+
+# ---------------------------------------------------------------------------
+# GeminiAdapter
+# ---------------------------------------------------------------------------
+
+
+class _GeminiUsage:
+    """usage_metadata stand-in.
+
+    Plain class rather than MagicMock so a test can omit fields entirely and
+    exercise the adapter's absent-field default path. Gemini reports these as
+    present-but-None when a count does not apply, so None is the default here
+    rather than 0.
+    """
+
+    def __init__(
+        self,
+        prompt_token_count=100,
+        candidates_token_count=20,
+        thoughts_token_count=None,
+        cached_content_token_count=None,
+    ):
+        self.prompt_token_count = prompt_token_count
+        self.candidates_token_count = candidates_token_count
+        self.thoughts_token_count = thoughts_token_count
+        self.cached_content_token_count = cached_content_token_count
+
+
+def _gemini_response(text="{}", finish_reason="STOP", usage=None):
+    """Build a generate_content response double.
+
+    finish_reason is an enum in the real SDK, so the double exposes `.name`
+    exactly as FinishReason does.
+    """
+    candidate = MagicMock()
+    candidate.finish_reason = MagicMock()
+    candidate.finish_reason.name = finish_reason
+    resp = MagicMock()
+    resp.candidates = [candidate]
+    resp.text = text
+    resp.usage_metadata = usage if usage is not None else _GeminiUsage()
+    return resp
+
+
+def _gemini_client(response=None, side_effect=None):
+    """Patch google.genai.Client and return (patcher_cm, mock_client)."""
+    mock_client = MagicMock()
+    if side_effect is not None:
+        mock_client.models.generate_content.side_effect = side_effect
+    else:
+        mock_client.models.generate_content.return_value = response or _gemini_response()
+    return mock_client
+
+
+def _api_error(status: int, message: str = "boom"):
+    """Construct a google-genai APIError carrying an HTTP status code."""
+    from google.genai import errors as genai_errors
+
+    exc = genai_errors.APIError.__new__(genai_errors.APIError)
+    Exception.__init__(exc, message)
+    exc.code = status
+    exc.message = message
+    return exc
+
+
+def test_gemini_adapter_complete():
+    """complete() sends system as system_instruction and user as contents."""
+    with patch("google.genai.Client") as mock_cls:
+        mock_client = _gemini_client(_gemini_response(text='{"ok": true}'))
+        mock_cls.return_value = mock_client
+
+        from mykg.llm.gemini_adapter import GeminiAdapter
+
+        adapter = GeminiAdapter(
+            model="gemini-3.7-flash", max_tokens=4096, timeout=30, api_key="test-key"
+        )
+        result = adapter.complete("system prompt", "user prompt")
+
+    assert result == '{"ok": true}'
+    kwargs = mock_client.models.generate_content.call_args.kwargs
+    assert kwargs["model"] == "gemini-3.7-flash"
+    assert kwargs["contents"] == "user prompt"
+    assert kwargs["config"].system_instruction == "system prompt"
+    assert kwargs["config"].max_output_tokens == 4096
+
+
+def test_gemini_adapter_requests_json_and_thinking_level():
+    """JSON mime type and the configured thinking_level reach the request config."""
+    with patch("google.genai.Client") as mock_cls:
+        mock_client = _gemini_client()
+        mock_cls.return_value = mock_client
+
+        from mykg.llm.gemini_adapter import GeminiAdapter
+
+        adapter = GeminiAdapter(
+            model="gemini-3.7-flash",
+            max_tokens=4096,
+            timeout=30,
+            api_key="test-key",
+            thinking_level="medium",
+        )
+        adapter.complete("sys", "user")
+
+    config = mock_client.models.generate_content.call_args.kwargs["config"]
+    assert config.response_mime_type == "application/json"
+    # The SDK coerces the string into a ThinkingLevel enum, so compare on value.
+    assert str(config.thinking_config.thinking_level.value).lower() == "medium"
+
+
+def test_gemini_thinking_level_none_omits_thinking_config():
+    """thinking_level=None sends no thinking_config, letting the model decide.
+
+    Kept configurable because thinking tokens are billed as output and drawn from
+    the max_output_tokens allowance; "low" is only a measured default, not a
+    requirement.
+    """
+    with patch("google.genai.Client") as mock_cls:
+        mock_client = _gemini_client()
+        mock_cls.return_value = mock_client
+
+        from mykg.llm.gemini_adapter import GeminiAdapter
+
+        adapter = GeminiAdapter(
+            model="gemini-3.7-flash",
+            max_tokens=4096,
+            timeout=30,
+            api_key="test-key",
+            thinking_level=None,
+        )
+        adapter.complete("sys", "user")
+
+    assert mock_client.models.generate_content.call_args.kwargs["config"].thinking_config is None
+
+
+def test_gemini_adapter_per_call_max_tokens_override():
+    """A per-call max_tokens overrides the adapter default."""
+    with patch("google.genai.Client") as mock_cls:
+        mock_client = _gemini_client()
+        mock_cls.return_value = mock_client
+
+        from mykg.llm.gemini_adapter import GeminiAdapter
+
+        adapter = GeminiAdapter(
+            model="gemini-3.7-flash", max_tokens=4096, timeout=30, api_key="test-key"
+        )
+        adapter.complete("sys", "user", max_tokens=99)
+
+    assert mock_client.models.generate_content.call_args.kwargs["config"].max_output_tokens == 99
+
+
+def test_gemini_adapter_forwards_timeout_as_milliseconds():
+    """The configured timeout reaches the SDK, converted from seconds to ms."""
+    with patch("google.genai.Client") as mock_cls:
+        mock_client = _gemini_client()
+        mock_cls.return_value = mock_client
+
+        from mykg.llm.gemini_adapter import GeminiAdapter
+
+        adapter = GeminiAdapter(
+            model="gemini-3.7-flash", max_tokens=10, timeout=30, api_key="test-key"
+        )
+        adapter.complete("sys", "user")
+        adapter.complete("sys", "user", timeout=7)
+
+    calls = mock_client.models.generate_content.call_args_list
+    assert calls[0].kwargs["config"].http_options.timeout == 30_000
+    # per-call override wins
+    assert calls[1].kwargs["config"].http_options.timeout == 7_000
+
+
+def test_gemini_adapter_raises_without_api_key():
+    """Missing GEMINI_API_KEY and GOOGLE_API_KEY raises a helpful ValueError."""
+    with patch("google.genai.Client"), patch.dict(os.environ, {}, clear=True):
+        from mykg.llm.gemini_adapter import GeminiAdapter
+
+        with pytest.raises(ValueError, match="GEMINI_API_KEY"):
+            GeminiAdapter(model="gemini-3.7-flash", max_tokens=10, timeout=10)
+
+
+def test_gemini_adapter_falls_back_to_google_api_key():
+    """GOOGLE_API_KEY is accepted when GEMINI_API_KEY is absent."""
+    with (
+        patch("google.genai.Client") as mock_cls,
+        patch.dict(os.environ, {"GOOGLE_API_KEY": "goog-key"}, clear=True),
+    ):
+        from mykg.llm.gemini_adapter import GeminiAdapter
+
+        GeminiAdapter(model="gemini-3.7-flash", max_tokens=10, timeout=10)
+
+    assert mock_cls.call_args.kwargs["api_key"] == "goog-key"
+
+
+def test_gemini_endpoint_label_includes_model():
+    with patch("google.genai.Client"):
+        from mykg.llm.gemini_adapter import GeminiAdapter
+
+        adapter = GeminiAdapter(model="gemini-3.7-flash", max_tokens=10, timeout=10, api_key="k")
+    label = adapter.endpoint_label()
+    assert "gemini" in label
+    assert "gemini-3.7-flash" in label
+
+
+def test_config_creates_gemini_adapter():
+    """load_adapter dispatches provider 'gemini' and forwards retry settings."""
+    raw = {
+        "provider": "gemini",
+        "llm": {
+            "model": "gemini-3.7-flash",
+            "max_output_tokens": 4096,
+            "timeout": 120,
+            "thinking_level": "high",
+            "retry_429_max": 4,
+            "retry_429_base_delay": 5.0,
+        },
+    }
+    with patch("google.genai.Client"), patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}):
+        from mykg.llm.config import load_adapter
+        from mykg.llm.gemini_adapter import GeminiAdapter
+
+        adapter = load_adapter(_raw=raw)
+
+    assert isinstance(adapter, GeminiAdapter)
+    assert adapter._model == "gemini-3.7-flash"
+    assert adapter._max_tokens == 4096
+    assert adapter._thinking_level == "high"
+    assert adapter._retry_429_max == 4
+    assert adapter._retry_429_base_delay == 5.0
+
+
+def test_gemini_429_retries_and_succeeds():
+    """A 429 is retried and the subsequent success is returned."""
+    with (
+        patch("google.genai.Client") as mock_cls,
+        patch("time.sleep"),
+    ):
+        mock_client = _gemini_client(
+            side_effect=[_api_error(429, "quota"), _gemini_response(text='{"ok":1}')]
+        )
+        mock_cls.return_value = mock_client
+
+        from mykg.llm.gemini_adapter import GeminiAdapter
+
+        adapter = GeminiAdapter(
+            model="gemini-3.7-flash",
+            max_tokens=10,
+            timeout=10,
+            api_key="k",
+            retry_429_max=2,
+            retry_429_base_delay=0.01,
+        )
+        assert adapter.complete("sys", "user") == '{"ok":1}'
+
+    assert mock_client.models.generate_content.call_count == 2
+
+
+def test_gemini_5xx_is_retried():
+    """A transient 5xx is retried rather than surfaced immediately."""
+    with patch("google.genai.Client") as mock_cls, patch("time.sleep"):
+        mock_client = _gemini_client(
+            side_effect=[_api_error(503, "overloaded"), _gemini_response(text="{}")]
+        )
+        mock_cls.return_value = mock_client
+
+        from mykg.llm.gemini_adapter import GeminiAdapter
+
+        adapter = GeminiAdapter(
+            model="gemini-3.7-flash",
+            max_tokens=10,
+            timeout=10,
+            api_key="k",
+            retry_429_max=2,
+            retry_429_base_delay=0.01,
+        )
+        adapter.complete("sys", "user")
+
+    assert mock_client.models.generate_content.call_count == 2
+
+
+def test_gemini_400_is_not_retried():
+    """A 400 is a caller error — surfaced immediately, never retried (cf. PR #44)."""
+    from google.genai import errors as genai_errors
+
+    with patch("google.genai.Client") as mock_cls, patch("time.sleep"):
+        mock_client = _gemini_client(side_effect=_api_error(400, "invalid argument"))
+        mock_cls.return_value = mock_client
+
+        from mykg.llm.gemini_adapter import GeminiAdapter
+
+        adapter = GeminiAdapter(
+            model="gemini-3.7-flash",
+            max_tokens=10,
+            timeout=10,
+            api_key="k",
+            retry_429_max=3,
+            retry_429_base_delay=0.01,
+        )
+        with pytest.raises(genai_errors.APIError):
+            adapter.complete("sys", "user")
+
+    assert mock_client.models.generate_content.call_count == 1
+
+
+def test_gemini_exhausts_retries_and_raises_provider_error():
+    """After retries are exhausted the provider's own exception surfaces."""
+    from google.genai import errors as genai_errors
+
+    with patch("google.genai.Client") as mock_cls, patch("time.sleep"):
+        mock_client = _gemini_client(side_effect=_api_error(429, "quota"))
+        mock_cls.return_value = mock_client
+
+        from mykg.llm.gemini_adapter import GeminiAdapter
+
+        adapter = GeminiAdapter(
+            model="gemini-3.7-flash",
+            max_tokens=10,
+            timeout=10,
+            api_key="k",
+            retry_429_max=2,
+            retry_429_base_delay=0.01,
+        )
+        with pytest.raises(genai_errors.APIError):
+            adapter.complete("sys", "user")
+
+    assert mock_client.models.generate_content.call_count == 3
+
+
+def test_gemini_reports_cached_token_usage():
+    """cached_content_token_count is forwarded as cache_read_tokens.
+
+    Implicit caching is automatic and server-side; the adapter only reports it.
+    """
+    usage = _GeminiUsage(
+        prompt_token_count=7005,
+        candidates_token_count=12,
+        thoughts_token_count=30,
+        cached_content_token_count=4037,
+    )
+    with (
+        patch("google.genai.Client") as mock_cls,
+        patch("mykg.llm.gemini_adapter.record_llm_call") as mock_record,
+    ):
+        mock_cls.return_value = _gemini_client(_gemini_response(usage=usage))
+
+        from mykg.llm.gemini_adapter import GeminiAdapter
+
+        adapter = GeminiAdapter(model="gemini-3.7-flash", max_tokens=100, timeout=10, api_key="k")
+        adapter.complete("sys", "user")
+
+    kwargs = mock_record.call_args.kwargs
+    assert kwargs["input_tokens"] == 7005
+    # thinking tokens are billed output, so they are counted as output
+    assert kwargs["output_tokens"] == 42
+    assert kwargs["cache_read_tokens"] == 4037
+    # implicit caching has no creation step
+    assert kwargs.get("cache_creation_tokens", 0) == 0
+
+
+def test_gemini_absent_usage_counts_default_to_zero():
+    """None-valued usage fields coerce to 0 rather than raising."""
+    usage = _GeminiUsage(
+        prompt_token_count=None,
+        candidates_token_count=None,
+        thoughts_token_count=None,
+        cached_content_token_count=None,
+    )
+    with (
+        patch("google.genai.Client") as mock_cls,
+        patch("mykg.llm.gemini_adapter.record_llm_call") as mock_record,
+    ):
+        mock_cls.return_value = _gemini_client(_gemini_response(usage=usage))
+
+        from mykg.llm.gemini_adapter import GeminiAdapter
+
+        adapter = GeminiAdapter(model="gemini-3.7-flash", max_tokens=10, timeout=10, api_key="k")
+        adapter.complete("sys", "user")
+
+    kwargs = mock_record.call_args.kwargs
+    assert kwargs["input_tokens"] == 0
+    assert kwargs["output_tokens"] == 0
+    assert kwargs["cache_read_tokens"] == 0
+
+
+def test_gemini_truncated_response_logs_finish_reason():
+    """MAX_TOKENS is normalised to 'max_tokens' for record_llm_call."""
+    with (
+        patch("google.genai.Client") as mock_cls,
+        patch("mykg.llm.gemini_adapter.record_llm_call") as mock_record,
+    ):
+        mock_cls.return_value = _gemini_client(
+            _gemini_response(text='{"partial": ', finish_reason="MAX_TOKENS")
+        )
+
+        from mykg.llm.gemini_adapter import GeminiAdapter
+
+        adapter = GeminiAdapter(model="gemini-3.7-flash", max_tokens=10, timeout=10, api_key="k")
+        adapter.complete("sys", "user")
+
+    assert mock_record.call_args.kwargs["finish_reason"] == "max_tokens"
+
+
+def test_gemini_normal_response_omits_finish_reason():
+    with (
+        patch("google.genai.Client") as mock_cls,
+        patch("mykg.llm.gemini_adapter.record_llm_call") as mock_record,
+    ):
+        mock_cls.return_value = _gemini_client(_gemini_response(finish_reason="STOP"))
+
+        from mykg.llm.gemini_adapter import GeminiAdapter
+
+        adapter = GeminiAdapter(model="gemini-3.7-flash", max_tokens=10, timeout=10, api_key="k")
+        adapter.complete("sys", "user")
+
+    assert mock_record.call_args.kwargs["finish_reason"] is None
+
+
+def test_gemini_empty_output_at_cap_warns_about_thinking_budget(caplog):
+    """An empty body at MAX_TOKENS names the thinking budget as the cause.
+
+    Gemini draws thinking tokens from max_output_tokens, so a too-small budget
+    returns finish_reason=MAX_TOKENS with no text at all. Without this warning
+    the failure surfaces downstream as an unexplained blank chunk (D33).
+    """
+    with patch("google.genai.Client") as mock_cls:
+        mock_cls.return_value = _gemini_client(
+            _gemini_response(text="", finish_reason="MAX_TOKENS")
+        )
+
+        from mykg.llm.gemini_adapter import GeminiAdapter
+
+        adapter = GeminiAdapter(model="gemini-3.7-flash", max_tokens=10, timeout=10, api_key="k")
+        with caplog.at_level("WARNING", logger="mykg.llm.gemini_adapter"):
+            assert adapter.complete("sys", "user") == ""
+
+    assert any("thinking budget" in r.getMessage().lower() for r in caplog.records)
+    assert any("max_output_tokens" in r.getMessage() for r in caplog.records)
+
+
+def test_gemini_context_exceeded_logs_and_reraises(caplog):
+    """A context-overflow error is logged with the standard marker and re-raised."""
+    from google.genai import errors as genai_errors
+
+    with (
+        patch("google.genai.Client") as mock_cls,
+        patch("time.sleep"),
+        caplog.at_level("WARNING", logger="mykg.llm.retry"),
+    ):
+        mock_cls.return_value = _gemini_client(
+            side_effect=_api_error(400, "input token count exceeds the maximum")
+        )
+
+        from mykg.llm.gemini_adapter import GeminiAdapter
+
+        adapter = GeminiAdapter(
+            model="gemini-3.7-flash", max_tokens=10, timeout=10, api_key="k", retry_429_max=0
+        )
+        with pytest.raises(genai_errors.APIError):
+            adapter.complete("sys", "user")
+
+    assert any("context length exceeded" in r.message for r in caplog.records)
+    assert any("gemini/gemini-3.7-flash" in r.message for r in caplog.records)
+
+
+def test_gemini_strips_code_fences():
+    """A fenced JSON body is unwrapped like every other adapter."""
+    with patch("google.genai.Client") as mock_cls:
+        mock_cls.return_value = _gemini_client(_gemini_response(text='```json\n{"a": 1}\n```'))
+
+        from mykg.llm.gemini_adapter import GeminiAdapter
+
+        adapter = GeminiAdapter(model="gemini-3.7-flash", max_tokens=10, timeout=10, api_key="k")
+        assert adapter.complete("sys", "user") == '{"a": 1}'
+
+
+@pytest.mark.live
+def test_gemini_live_call_returns_json():
+    """Real API call — skipped unless GEMINI_API_KEY is set."""
+    key = _load_api_key("GEMINI_API_KEY", "GOOGLE_API_KEY")
+    if not key:
+        pytest.skip("GEMINI_API_KEY not set")
+
+    from mykg.llm.gemini_adapter import GeminiAdapter
+
+    adapter = GeminiAdapter(
+        model=os.environ.get("GEMINI_MODEL", "gemini-3.7-flash"),
+        max_tokens=2000,
+        timeout=120,
+        api_key=key,
+    )
+    try:
+        out = adapter.complete("Reply with JSON only.", 'Return {"pong": true}')
+    except Exception as exc:  # noqa: BLE001 - re-raised unless it is a quota 429
+        _skip_if_quota_exhausted(exc)
+        raise
+    assert out.strip()
+    assert json.loads(out)["pong"] is True
+
+
+def test_gemini_safety_blocked_response_warns_and_records(caplog):
+    """A SAFETY-blocked empty body is diagnosed instead of returning silently.
+
+    Gemini returns HTTP 200 with an empty body and finish_reason=SAFETY when it
+    refuses. Without an explicit branch this looks identical to a successful
+    empty extraction and lands in failed_chunks.json unexplained (D33).
+    """
+    with (
+        patch("google.genai.Client") as mock_cls,
+        patch("mykg.llm.gemini_adapter.record_llm_call") as mock_record,
+    ):
+        mock_cls.return_value = _gemini_client(_gemini_response(text="", finish_reason="SAFETY"))
+
+        from mykg.llm.gemini_adapter import GeminiAdapter
+
+        adapter = GeminiAdapter(model="gemini-3.7-flash", max_tokens=500, timeout=10, api_key="k")
+        with caplog.at_level("WARNING", logger="mykg.llm.gemini_adapter"):
+            assert adapter.complete("sys", "user") == ""
+
+    assert any("blocked" in r.getMessage().lower() for r in caplog.records)
+    assert any("SAFETY" in r.getMessage() for r in caplog.records)
+    assert "SAFETY" in (mock_record.call_args.kwargs.get("error") or "")
+
+
+def test_gemini_recitation_block_is_reported():
+    """RECITATION is treated the same as any other non-STOP empty response."""
+    with (
+        patch("google.genai.Client") as mock_cls,
+        patch("mykg.llm.gemini_adapter.record_llm_call") as mock_record,
+    ):
+        mock_cls.return_value = _gemini_client(
+            _gemini_response(text="", finish_reason="RECITATION")
+        )
+
+        from mykg.llm.gemini_adapter import GeminiAdapter
+
+        adapter = GeminiAdapter(model="gemini-3.7-flash", max_tokens=500, timeout=10, api_key="k")
+        adapter.complete("sys", "user")
+
+    assert "RECITATION" in (mock_record.call_args.kwargs.get("error") or "")
+
+
+def test_gemini_successful_response_records_no_error():
+    """A normal STOP response carries no error field."""
+    with (
+        patch("google.genai.Client") as mock_cls,
+        patch("mykg.llm.gemini_adapter.record_llm_call") as mock_record,
+    ):
+        mock_cls.return_value = _gemini_client(
+            _gemini_response(text='{"ok": true}', finish_reason="STOP")
+        )
+
+        from mykg.llm.gemini_adapter import GeminiAdapter
+
+        adapter = GeminiAdapter(model="gemini-3.7-flash", max_tokens=500, timeout=10, api_key="k")
+        adapter.complete("sys", "user")
+
+    assert mock_record.call_args.kwargs.get("error") is None
+
+
+def test_gemini_empty_body_with_stop_is_not_flagged_as_blocked():
+    """An empty body with finish_reason=STOP is a genuine empty answer, not a block."""
+    with (
+        patch("google.genai.Client") as mock_cls,
+        patch("mykg.llm.gemini_adapter.record_llm_call") as mock_record,
+    ):
+        mock_cls.return_value = _gemini_client(_gemini_response(text="", finish_reason="STOP"))
+
+        from mykg.llm.gemini_adapter import GeminiAdapter
+
+        adapter = GeminiAdapter(model="gemini-3.7-flash", max_tokens=500, timeout=10, api_key="k")
+        assert adapter.complete("sys", "user") == ""
+
+    assert mock_record.call_args.kwargs.get("error") is None
+
+
+def test_gemini_output_cap_error_not_mislabelled_as_context_overflow():
+    """A max_output_tokens rejection must not be reported as context overflow.
+
+    The two have different fixes — one is a chunking-budget problem, the other a
+    max_output_tokens problem — so conflating them misdirects the operator.
+    """
+    from mykg.llm.retry import looks_like_context_exceeded
+
+    output_cap = Exception(
+        "Requested max_output_tokens exceeds the maximum number of tokens allowed"
+    )
+    input_overflow = Exception(
+        "The input token count (1200000) exceeds the maximum number of tokens allowed (1048576)"
+    )
+    assert looks_like_context_exceeded(output_cap) is False
+    assert looks_like_context_exceeded(input_overflow) is True
+
+
+def test_gemini_missing_usage_metadata_defaults_to_zero():
+    """A response with no usage_metadata at all records zero counts, not an error.
+
+    Guards the `getattr(usage, field, 0)` default path in `_count` against a
+    malformed or usage-free response (raised in review of PR #61).
+    """
+    with (
+        patch("google.genai.Client") as mock_cls,
+        patch("mykg.llm.gemini_adapter.record_llm_call") as mock_record,
+    ):
+        resp = _gemini_response()
+        resp.usage_metadata = None
+        mock_cls.return_value = _gemini_client(resp)
+
+        from mykg.llm.gemini_adapter import GeminiAdapter
+
+        adapter = GeminiAdapter(model="gemini-3.7-flash", max_tokens=10, timeout=10, api_key="k")
+        adapter.complete("sys", "user")
+
+    kwargs = mock_record.call_args.kwargs
+    assert kwargs["input_tokens"] == 0
+    assert kwargs["output_tokens"] == 0
+    assert kwargs["cache_read_tokens"] == 0
+
+
+def test_gemini_count_helper_tolerates_absent_usage():
+    """_count returns 0 for a None usage object, a bare object, and non-int values."""
+    from mykg.llm.gemini_adapter import _count
+
+    class _Bare:
+        pass
+
+    class _NoneValued:
+        prompt_token_count = None
+
+    class _NonInt:
+        prompt_token_count = "12"
+
+    assert _count(None, "prompt_token_count") == 0
+    assert _count(_Bare(), "prompt_token_count") == 0
+    assert _count(_NoneValued(), "prompt_token_count") == 0
+    assert _count(_NonInt(), "prompt_token_count") == 0
+
+
+def test_gemini_afc_notice_filtered_without_muting_real_warnings():
+    """The AFC notice is dropped, but genuine google_genai warnings still pass.
+
+    Raised in review of PR #61: raising the logger's level would have suppressed
+    legitimate warnings from the same logger, so a message-specific filter is
+    used instead.
+    """
+    import logging as _logging
+
+    with patch("google.genai.Client"):
+        from mykg.llm.gemini_adapter import GeminiAdapter
+
+        GeminiAdapter(model="gemini-3.7-flash", max_tokens=10, timeout=10, api_key="k")
+
+    logger = _logging.getLogger("google_genai.models")
+    # The level is untouched — only a filter was added.
+    assert logger.level == _logging.NOTSET
+
+    def _rec(msg):
+        return _logging.LogRecord(
+            "google_genai.models", _logging.WARNING, __file__, 1, msg, None, None
+        )
+
+    # Both AFC variants the SDK emits must be dropped.
+    for noisy in (
+        "Direct use of automatic function calling (AFC) is not recommended",
+        "AFC is enabled with max remote calls: 10.",
+    ):
+        assert any(not f(_rec(noisy)) for f in logger.filters), f"should be filtered: {noisy}"
+
+    assert all(f(_rec("quota exceeded for this project")) for f in logger.filters), (
+        "genuine warnings must still pass through"
+    )
+
+
+def test_gemini_afc_filter_installed_only_once():
+    """Constructing many adapters does not stack duplicate filters."""
+    import logging as _logging
+
+    logger = _logging.getLogger("google_genai.models")
+    with patch("google.genai.Client"):
+        from mykg.llm.gemini_adapter import GeminiAdapter
+
+        GeminiAdapter(model="gemini-3.7-flash", max_tokens=10, timeout=10, api_key="k")
+        before = len(logger.filters)
+        for _ in range(5):
+            GeminiAdapter(model="gemini-3.7-flash", max_tokens=10, timeout=10, api_key="k")
+
+    assert len(logger.filters) == before
+
+
+def test_gemini_status_of_falls_back_to_status_code():
+    """_status_of reads .status_code when .code is absent or non-integer."""
+    from mykg.llm.gemini_adapter import _status_of
+
+    class _NoCode:
+        status_code = 503
+
+    class _StringCode:
+        code = "RESOURCE_EXHAUSTED"
+        status_code = 429
+
+    class _Neither:
+        pass
+
+    assert _status_of(_NoCode()) == 503
+    # a non-int .code must not be returned verbatim
+    assert _status_of(_StringCode()) == 429
+    assert _status_of(_Neither()) is None
+
+
+def test_gemini_raw_finish_reason_edge_cases():
+    """_raw_finish_reason handles absent candidates, a None reason, and enum reprs."""
+    from mykg.llm.gemini_adapter import GeminiAdapter
+
+    read = GeminiAdapter._raw_finish_reason
+
+    class _NoCandidates:
+        candidates = []
+
+    class _NoneReason:
+        def __init__(self):
+            c = MagicMock()
+            c.finish_reason = None
+            self.candidates = [c]
+
+    class _PlainStringEnum:
+        """finish_reason whose str() is a dotted enum repr and has no .name."""
+
+        def __init__(self):
+            c = MagicMock()
+            c.finish_reason = "FinishReason.MAX_TOKENS"
+            self.candidates = [c]
+
+    assert read(_NoCandidates()) is None
+    assert read(_NoneReason()) is None
+    # dotted enum repr is reduced to the bare member name
+    assert read(_PlainStringEnum()) == "MAX_TOKENS"
+
+
+def test_config_gemini_thinking_level_defaults_when_key_absent():
+    """Omitting llm.thinking_level yields the adapter's "low" default.
+
+    The shipped gemini profile deliberately does not carry the key, so the
+    default must survive its absence rather than becoming None.
+    """
+    raw = {
+        "provider": "gemini",
+        "llm": {
+            "model": "gemini-3.7-flash",
+            "max_output_tokens": 4096,
+            "timeout": 120,
+        },
+    }
+    with patch("google.genai.Client"), patch.dict(os.environ, {"GEMINI_API_KEY": "k"}):
+        from mykg.llm.config import load_adapter
+
+        adapter = load_adapter(_raw=raw)
+
+    assert adapter._thinking_level == "low"
+
+
+# ---------------------------------------------------------------------------
+# temperature — Anthropic
+# ---------------------------------------------------------------------------
+
+
+def _anthropic_client(text: str = "ok"):
+    """A mocked anthropic client whose messages.create returns a text block."""
+    block = MagicMock()
+    block.text = text
+    response = MagicMock()
+    response.content = [block]
+    client = MagicMock()
+    client.messages.create.return_value = response
+    return client
+
+
+def test_anthropic_omits_temperature_when_unset():
+    """No configured temperature -> the key is absent from the payload entirely."""
+    with patch("anthropic.Anthropic") as mock_cls:
+        mock_cls.return_value = client = _anthropic_client()
+
+        from mykg.llm.anthropic_adapter import AnthropicAdapter
+
+        adapter = AnthropicAdapter(
+            model="claude-sonnet-4-5", max_tokens=4096, timeout=30, api_key="k"
+        )
+        adapter.complete("sys", "user")
+
+    assert "temperature" not in client.messages.create.call_args[1]
+
+
+def test_anthropic_sends_configured_temperature():
+    with patch("anthropic.Anthropic") as mock_cls:
+        mock_cls.return_value = client = _anthropic_client()
+
+        from mykg.llm.anthropic_adapter import AnthropicAdapter
+
+        adapter = AnthropicAdapter(
+            model="claude-sonnet-4-5",
+            max_tokens=4096,
+            timeout=30,
+            api_key="k",
+            temperature=0.2,
+        )
+        adapter.complete("sys", "user")
+
+    assert client.messages.create.call_args[1]["temperature"] == 0.2
+
+
+def test_anthropic_sends_zero_temperature():
+    """0.0 is a real value, not an omission — a falsy check here would drop it."""
+    with patch("anthropic.Anthropic") as mock_cls:
+        mock_cls.return_value = client = _anthropic_client()
+
+        from mykg.llm.anthropic_adapter import AnthropicAdapter
+
+        adapter = AnthropicAdapter(
+            model="claude-sonnet-4-5",
+            max_tokens=4096,
+            timeout=30,
+            api_key="k",
+            temperature=0.0,
+        )
+        adapter.complete("sys", "user")
+
+    assert client.messages.create.call_args[1]["temperature"] == 0.0
+
+
+def test_anthropic_per_call_temperature_overrides_configured():
+    with patch("anthropic.Anthropic") as mock_cls:
+        mock_cls.return_value = client = _anthropic_client()
+
+        from mykg.llm.anthropic_adapter import AnthropicAdapter
+
+        adapter = AnthropicAdapter(
+            model="claude-sonnet-4-5",
+            max_tokens=4096,
+            timeout=30,
+            api_key="k",
+            temperature=0.2,
+        )
+        adapter.complete("sys", "user", temperature=0.9)
+
+    assert client.messages.create.call_args[1]["temperature"] == 0.9
+
+
+def test_anthropic_temperature_does_not_disturb_other_payload_keys():
+    """Converting the call to a kwargs dict must preserve the existing payload."""
+    with patch("anthropic.Anthropic") as mock_cls:
+        mock_cls.return_value = client = _anthropic_client()
+
+        from mykg.llm.anthropic_adapter import AnthropicAdapter
+
+        adapter = AnthropicAdapter(
+            model="claude-sonnet-4-5", max_tokens=4096, timeout=30, api_key="k"
+        )
+        adapter.complete("sys", "user")
+
+    kwargs = client.messages.create.call_args[1]
+    assert kwargs["model"] == "claude-sonnet-4-5"
+    assert kwargs["max_tokens"] == 4096
+    assert kwargs["system"] == "sys"
+    assert kwargs["messages"] == [{"role": "user", "content": "user"}]
+    assert kwargs["timeout"] == 30
+    assert kwargs["cache_control"] == {"type": "ephemeral"}
+
+
+# ---------------------------------------------------------------------------
+# temperature — OpenAI
+# ---------------------------------------------------------------------------
+
+
+def _openai_client(text: str = "ok"):
+    """A mocked OpenAI client whose chat.completions.create returns `text`."""
+    response = MagicMock()
+    response.choices[0].message.content = text
+    response.choices[0].finish_reason = "stop"
+    client = MagicMock()
+    client.chat.completions.create.return_value = response
+    return client
+
+
+def test_openai_omits_temperature_when_unset():
+    with patch("openai.OpenAI") as mock_cls:
+        mock_cls.return_value = client = _openai_client()
+
+        from mykg.llm.openai_adapter import OpenAIAdapter
+
+        adapter = OpenAIAdapter(model="gpt-4o", max_tokens=4096, timeout=30, api_key="k")
+        adapter.complete("sys", "user")
+
+    assert "temperature" not in client.chat.completions.create.call_args[1]
+
+
+def test_openai_sends_configured_temperature_on_ordinary_model():
+    with patch("openai.OpenAI") as mock_cls:
+        mock_cls.return_value = client = _openai_client()
+
+        from mykg.llm.openai_adapter import OpenAIAdapter
+
+        adapter = OpenAIAdapter(
+            model="gpt-4o", max_tokens=4096, timeout=30, api_key="k", temperature=0.0
+        )
+        adapter.complete("sys", "user")
+
+    assert client.chat.completions.create.call_args[1]["temperature"] == 0.0
+
+
+def test_openai_omits_temperature_for_reasoning_model():
+    """A gpt-5 model rejects an explicit temperature, so a configured value is dropped.
+
+    This is the case that protects mykg's shipped default profile.
+    """
+    with patch("openai.OpenAI") as mock_cls:
+        mock_cls.return_value = client = _openai_client()
+
+        from mykg.llm.openai_adapter import OpenAIAdapter
+
+        adapter = OpenAIAdapter(
+            model="gpt-5.4-mini-2026-03-17",
+            max_tokens=4096,
+            timeout=30,
+            api_key="k",
+            temperature=0.0,
+        )
+        adapter.complete("sys", "user")
+
+    kwargs = client.chat.completions.create.call_args[1]
+    assert "temperature" not in kwargs
+    # The max_completion_tokens routing for this family is unaffected.
+    assert kwargs["max_completion_tokens"] == 4096
+
+
+def test_openai_per_call_temperature_overrides_configured():
+    with patch("openai.OpenAI") as mock_cls:
+        mock_cls.return_value = client = _openai_client()
+
+        from mykg.llm.openai_adapter import OpenAIAdapter
+
+        adapter = OpenAIAdapter(
+            model="gpt-4o", max_tokens=4096, timeout=30, api_key="k", temperature=0.2
+        )
+        adapter.complete("sys", "user", temperature=0.9)
+
+    assert client.chat.completions.create.call_args[1]["temperature"] == 0.9
+
+
+def _openai_bad_request(message: str):
+    import openai
+
+    return openai.BadRequestError(
+        message=message,
+        response=MagicMock(status_code=400, headers={}),
+        body={"error": {"message": message}},
+    )
+
+
+def test_openai_recovers_when_api_rejects_temperature(caplog):
+    """An unlisted family that 400s on temperature is retried once without it."""
+    import logging
+
+    response = MagicMock()
+    response.choices[0].message.content = "recovered"
+    response.choices[0].finish_reason = "stop"
+
+    with patch("openai.OpenAI") as mock_cls:
+        mock_cls.return_value = client = MagicMock()
+        client.chat.completions.create.side_effect = [
+            _openai_bad_request("Unsupported value: 'temperature' is not supported"),
+            response,
+        ]
+
+        from mykg.llm.openai_adapter import OpenAIAdapter
+
+        adapter = OpenAIAdapter(
+            model="gpt-4o", max_tokens=4096, timeout=30, api_key="k", temperature=0.5
+        )
+        with caplog.at_level(logging.WARNING, logger="mykg.llm.openai_adapter"):
+            assert adapter.complete("sys", "user") == "recovered"
+
+    assert client.chat.completions.create.call_count == 2
+    first, second = client.chat.completions.create.call_args_list
+    assert first[1]["temperature"] == 0.5
+    assert "temperature" not in second[1]
+    assert "rejected an explicit temperature" in caplog.text
+
+
+def test_openai_temperature_rejection_is_latched():
+    """After one rejection the adapter stops sending temperature entirely."""
+    ok = MagicMock()
+    ok.choices[0].message.content = "ok"
+    ok.choices[0].finish_reason = "stop"
+
+    with patch("openai.OpenAI") as mock_cls:
+        mock_cls.return_value = client = MagicMock()
+        client.chat.completions.create.side_effect = [
+            _openai_bad_request("'temperature' is not supported with this model"),
+            ok,
+            ok,
+        ]
+
+        from mykg.llm.openai_adapter import OpenAIAdapter
+
+        adapter = OpenAIAdapter(
+            model="gpt-4o", max_tokens=4096, timeout=30, api_key="k", temperature=0.5
+        )
+        adapter.complete("sys", "user")
+        adapter.complete("sys", "user")
+
+    # 2 calls for the first complete() (reject + retry), 1 for the second.
+    assert client.chat.completions.create.call_count == 3
+    assert "temperature" not in client.chat.completions.create.call_args_list[2][1]
+
+
+def test_openai_unrelated_bad_request_still_raises():
+    """The temperature branch must not swallow other 400s."""
+    import openai
+
+    with patch("openai.OpenAI") as mock_cls:
+        mock_cls.return_value = client = MagicMock()
+        client.chat.completions.create.side_effect = _openai_bad_request(
+            "Invalid value for 'messages'"
+        )
+
+        from mykg.llm.openai_adapter import OpenAIAdapter
+
+        adapter = OpenAIAdapter(
+            model="gpt-4o", max_tokens=4096, timeout=30, api_key="k", temperature=0.5
+        )
+        with pytest.raises(openai.BadRequestError):
+            adapter.complete("sys", "user")
+
+    assert client.chat.completions.create.call_count == 1
+
+
+def test_openai_max_tokens_swap_still_carries_temperature():
+    """The pre-existing max_tokens fallback keeps sending the configured temperature."""
+    ok = MagicMock()
+    ok.choices[0].message.content = "ok"
+    ok.choices[0].finish_reason = "stop"
+
+    with patch("openai.OpenAI") as mock_cls:
+        mock_cls.return_value = client = MagicMock()
+        client.chat.completions.create.side_effect = [
+            _openai_bad_request(
+                "Unsupported parameter: 'max_tokens' is not supported; use "
+                "'max_completion_tokens' instead"
+            ),
+            ok,
+        ]
+
+        from mykg.llm.openai_adapter import OpenAIAdapter
+
+        adapter = OpenAIAdapter(
+            model="gpt-4o", max_tokens=4096, timeout=30, api_key="k", temperature=0.3
+        )
+        assert adapter.complete("sys", "user") == "ok"
+
+    second = client.chat.completions.create.call_args_list[1][1]
+    assert second["max_completion_tokens"] == 4096
+    assert second["temperature"] == 0.3
+
+
+# ---------------------------------------------------------------------------
+# temperature — OpenRouter
+# ---------------------------------------------------------------------------
+
+
+def test_openrouter_omits_temperature_when_unset():
+    with patch("openai.OpenAI") as mock_cls:
+        mock_cls.return_value = client = _openai_client()
+
+        from mykg.llm.openrouter_adapter import OpenRouterAdapter
+
+        adapter = OpenRouterAdapter(
+            model="openrouter/free", max_tokens=4096, timeout=30, api_key="k"
+        )
+        adapter.complete("sys", "user")
+
+    assert "temperature" not in client.chat.completions.create.call_args[1]
+
+
+def test_openrouter_sends_configured_temperature():
+    with patch("openai.OpenAI") as mock_cls:
+        mock_cls.return_value = client = _openai_client()
+
+        from mykg.llm.openrouter_adapter import OpenRouterAdapter
+
+        adapter = OpenRouterAdapter(
+            model="anthropic/claude-sonnet-4-5",
+            max_tokens=4096,
+            timeout=30,
+            api_key="k",
+            temperature=0.0,
+        )
+        adapter.complete("sys", "user")
+
+    assert client.chat.completions.create.call_args[1]["temperature"] == 0.0
+
+
+def test_openrouter_omits_temperature_for_namespaced_reasoning_model():
+    """openai/gpt-5-mini must be caught despite the vendor prefix."""
+    with patch("openai.OpenAI") as mock_cls:
+        mock_cls.return_value = client = _openai_client()
+
+        from mykg.llm.openrouter_adapter import OpenRouterAdapter
+
+        adapter = OpenRouterAdapter(
+            model="openai/gpt-5-mini",
+            max_tokens=4096,
+            timeout=30,
+            api_key="k",
+            temperature=0.0,
+        )
+        adapter.complete("sys", "user")
+
+    assert "temperature" not in client.chat.completions.create.call_args[1]
+
+
+def test_openrouter_temperature_preserves_other_payload_keys():
+    with patch("openai.OpenAI") as mock_cls:
+        mock_cls.return_value = client = _openai_client()
+
+        from mykg.llm.openrouter_adapter import OpenRouterAdapter
+
+        adapter = OpenRouterAdapter(
+            model="openrouter/free",
+            max_tokens=4096,
+            timeout=30,
+            api_key="k",
+            temperature=0.4,
+        )
+        adapter.complete("sys", "user")
+
+    kwargs = client.chat.completions.create.call_args[1]
+    assert kwargs["model"] == "openrouter/free"
+    assert kwargs["max_tokens"] == 4096
+    assert kwargs["messages"][0] == {"role": "system", "content": "sys"}
+    assert kwargs["temperature"] == 0.4
+
+
+# ---------------------------------------------------------------------------
+# temperature — Gemini
+# ---------------------------------------------------------------------------
+
+
+def _gemini_config_of(client):
+    """The GenerateContentConfig passed to the mocked generate_content call."""
+    return client.models.generate_content.call_args[1]["config"]
+
+
+def test_gemini_temperature_unset_is_dropped_from_the_request():
+    """The SDK omits a None temperature from the serialized payload."""
+    with patch("google.genai.Client") as mock_cls:
+        mock_cls.return_value = client = _gemini_client(_gemini_response(text='{"a": 1}'))
+
+        from mykg.llm.gemini_adapter import GeminiAdapter
+
+        adapter = GeminiAdapter(model="gemini-3.7-flash", max_tokens=100, timeout=10, api_key="k")
+        adapter.complete("sys", "user")
+
+    config = _gemini_config_of(client)
+    assert config.temperature is None
+    assert "temperature" not in config.model_dump(exclude_none=True)
+
+
+def test_gemini_sends_configured_temperature():
+    with patch("google.genai.Client") as mock_cls:
+        mock_cls.return_value = client = _gemini_client(_gemini_response(text='{"a": 1}'))
+
+        from mykg.llm.gemini_adapter import GeminiAdapter
+
+        adapter = GeminiAdapter(
+            model="gemini-3.7-flash",
+            max_tokens=100,
+            timeout=10,
+            api_key="k",
+            temperature=0.3,
+        )
+        adapter.complete("sys", "user")
+
+    assert _gemini_config_of(client).temperature == 0.3
+
+
+def test_gemini_sends_zero_temperature():
+    """0.0 must survive into the serialized request, not be treated as unset."""
+    with patch("google.genai.Client") as mock_cls:
+        mock_cls.return_value = client = _gemini_client(_gemini_response(text='{"a": 1}'))
+
+        from mykg.llm.gemini_adapter import GeminiAdapter
+
+        adapter = GeminiAdapter(
+            model="gemini-3.7-flash",
+            max_tokens=100,
+            timeout=10,
+            api_key="k",
+            temperature=0.0,
+        )
+        adapter.complete("sys", "user")
+
+    config = _gemini_config_of(client)
+    assert config.temperature == 0.0
+    assert "temperature" in config.model_dump(exclude_none=True)
+
+
+def test_gemini_per_call_temperature_overrides_configured():
+    with patch("google.genai.Client") as mock_cls:
+        mock_cls.return_value = client = _gemini_client(_gemini_response(text='{"a": 1}'))
+
+        from mykg.llm.gemini_adapter import GeminiAdapter
+
+        adapter = GeminiAdapter(
+            model="gemini-3.7-flash",
+            max_tokens=100,
+            timeout=10,
+            api_key="k",
+            temperature=0.3,
+        )
+        adapter.complete("sys", "user", temperature=0.9)
+
+    assert _gemini_config_of(client).temperature == 0.9
+
+
+def test_gemini_temperature_does_not_disturb_thinking_or_timeout():
+    """The new _build_config parameter must not perturb the existing config."""
+    with patch("google.genai.Client") as mock_cls:
+        mock_cls.return_value = client = _gemini_client(_gemini_response(text='{"a": 1}'))
+
+        from mykg.llm.gemini_adapter import GeminiAdapter
+
+        adapter = GeminiAdapter(
+            model="gemini-3.7-flash",
+            max_tokens=100,
+            timeout=10,
+            api_key="k",
+            thinking_level="low",
+            temperature=0.2,
+        )
+        adapter.complete("sys", "user")
+
+    config = _gemini_config_of(client)
+    assert config.temperature == 0.2
+    assert config.max_output_tokens == 100
+    assert config.system_instruction == "sys"
+    assert config.response_mime_type == "application/json"
+    # The SDK coerces the string to a ThinkingLevel enum.
+    assert str(config.thinking_config.thinking_level.value).lower() == "low"
+    assert config.http_options.timeout == 10_000
+
+
+# ---------------------------------------------------------------------------
+# temperature — Ollama
+# ---------------------------------------------------------------------------
+
+
+def _ollama_options(temperature=None, **overrides):
+    """Run a mocked Ollama call and return the decoded options sub-dict."""
+    mock_response = MagicMock()
+    mock_response.read.return_value = json.dumps({"response": "hello"}).encode()
+
+    kwargs = {
+        "model": "gemma4:31b",
+        "base_url": "http://localhost:11434",
+        "timeout": 120,
+        "stream": False,
+        "max_tokens": 8096,
+        "context_window": 64000,
+    }
+    kwargs.update(overrides)
+    if temperature is not None:
+        kwargs["temperature"] = temperature
+
+    with patch("urllib.request.urlopen") as mock_urlopen:
+        mock_urlopen.return_value.__enter__.return_value = mock_response
+
+        from mykg.llm.ollama_adapter import OllamaAdapter
+
+        OllamaAdapter(**kwargs).complete("sys", "user")
+
+    body = json.loads(mock_urlopen.call_args[0][0].data.decode("utf-8"))
+    return body
+
+
+def test_ollama_omits_temperature_when_unset():
+    """Unset -> Ollama applies the model's own default from the modelfile."""
+    assert "temperature" not in _ollama_options()["options"]
+
+
+def test_ollama_sends_configured_temperature_inside_options():
+    """Ollama takes sampling params in the options sub-dict, not at the top level."""
+    body = _ollama_options(temperature=0.2)
+    assert body["options"]["temperature"] == 0.2
+    assert "temperature" not in body
+
+
+def test_ollama_sends_zero_temperature():
+    assert _ollama_options(temperature=0.0)["options"]["temperature"] == 0.0
+
+
+def test_ollama_temperature_preserves_existing_options():
+    """num_ctx and num_predict must survive the options-dict refactor."""
+    options = _ollama_options(temperature=0.4)["options"]
+    assert options["num_ctx"] == 64000
+    assert options["num_predict"] == 8096
+    assert options["temperature"] == 0.4
+
+
+def test_ollama_payload_keeps_non_ascii_unescaped():
+    """ensure_ascii=False keeps prompts compact (Invariant 20b)."""
+    mock_response = MagicMock()
+    mock_response.read.return_value = json.dumps({"response": "ok"}).encode()
+
+    with patch("urllib.request.urlopen") as mock_urlopen:
+        mock_urlopen.return_value.__enter__.return_value = mock_response
+
+        from mykg.llm.ollama_adapter import OllamaAdapter
+
+        adapter = OllamaAdapter(
+            model="gemma4:31b",
+            base_url="http://localhost:11434",
+            timeout=120,
+            stream=False,
+            max_tokens=8096,
+            context_window=64000,
+        )
+        adapter.complete("sys", "réunion München 15 µm")
+
+    data = mock_urlopen.call_args[0][0].data
+    assert "réunion".encode() in data
+    assert b"\\u00e9" not in data
+    assert json.loads(data.decode("utf-8"))["prompt"].endswith("réunion München 15 µm")
+
+
+# ---------------------------------------------------------------------------
+# temperature — load_adapter wiring
+# ---------------------------------------------------------------------------
+
+
+_TEMP_PROVIDER_CASES = [
+    ("openai", {"model": "gpt-4o", "max_output_tokens": 4096, "timeout": 30}, "openai.OpenAI"),
+    (
+        "anthropic",
+        {"model": "claude-sonnet-4-5", "max_output_tokens": 4096, "timeout": 30},
+        "anthropic.Anthropic",
+    ),
+    (
+        "openrouter",
+        {"model": "openrouter/free", "max_output_tokens": 4096, "timeout": 30},
+        "openai.OpenAI",
+    ),
+    (
+        "gemini",
+        {"model": "gemini-3.7-flash", "max_output_tokens": 4096, "timeout": 30},
+        "google.genai.Client",
+    ),
+    (
+        "ollama",
+        {
+            "model": "gemma4:31b",
+            "max_output_tokens": 4096,
+            "timeout": 30,
+            "base_url": "http://localhost:11434",
+            "stream": False,
+            "context_window": 64000,
+        },
+        None,
+    ),
+]
+
+
+@pytest.mark.parametrize("provider,llm,patch_target", _TEMP_PROVIDER_CASES)
+def test_load_adapter_defaults_temperature_to_zero(provider, llm, patch_target, monkeypatch):
+    """A config with no temperature key resolves to DEFAULT_TEMPERATURE (0.0).
+
+    Extraction wants determinism: the same corpus should induce the same schema
+    and yield the same graph run over run, which provider defaults (~1.0) work
+    against. Models that reject an explicit value still have it dropped by the
+    prefix guard, so this default is safe on every shipped profile.
+    """
+    for var in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "OPENROUTER_API_KEY", "GEMINI_API_KEY"):
+        monkeypatch.setenv(var, "test-key")
+
+    from mykg.llm.config import load_adapter
+
+    raw = {"provider": provider, "llm": llm}
+    if patch_target:
+        with patch(patch_target):
+            adapter = load_adapter(_raw=raw)
+    else:
+        adapter = load_adapter(_raw=raw)
+
+    from mykg.llm.temperature import DEFAULT_TEMPERATURE
+
+    assert adapter._temperature == DEFAULT_TEMPERATURE
+    assert DEFAULT_TEMPERATURE == 0.0
+
+
+@pytest.mark.parametrize("provider,llm,patch_target", _TEMP_PROVIDER_CASES)
+def test_load_adapter_passes_configured_temperature(provider, llm, patch_target, monkeypatch):
+    for var in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "OPENROUTER_API_KEY", "GEMINI_API_KEY"):
+        monkeypatch.setenv(var, "test-key")
+
+    from mykg.llm.config import load_adapter
+
+    raw = {"provider": provider, "llm": {**llm, "temperature": 0.0}}
+    if patch_target:
+        with patch(patch_target):
+            adapter = load_adapter(_raw=raw)
+    else:
+        adapter = load_adapter(_raw=raw)
+
+    # 0.0 must survive the whole config path, not be lost to a falsy check.
+    assert adapter._temperature == 0.0
+
+
+def test_load_adapter_claude_cli_accepts_temperature():
+    from mykg.llm.config import load_adapter
+
+    raw = {
+        "provider": "claude-cli",
+        "llm": {"model": "sonnet", "max_output_tokens": 4096, "timeout": 30, "temperature": 0.3},
+    }
+    with patch("shutil.which", return_value="/usr/bin/claude"):
+        adapter = load_adapter(_raw=raw)
+    assert adapter._temperature == 0.3
+
+
+def test_load_adapter_agent_accepts_temperature(tmp_path):
+    from mykg.llm.config import load_adapter
+
+    raw = {
+        "provider": "agent",
+        "llm": {"model": "claude", "max_output_tokens": 4096, "timeout": 30, "temperature": 0.4},
+        "agent": {"inbox_dir": "in", "outbox_dir": "out", "poll_interval_seconds": 0.1},
+    }
+    adapter = load_adapter(_raw=raw, intermediate_dir=tmp_path)
+    assert adapter._temperature == 0.4
+
+
+def test_shipped_config_has_no_temperature_key():
+    """The two shipped YAML files intentionally omit llm.temperature.
+
+    Temperature is an internal knob, not a user-facing setting: it is absent
+    from the shipped profiles and from the README. Adding it here would both
+    change extraction behaviour for every existing user and promote it to
+    public API. If this fails, that decision was reversed by accident.
+    """
+    import mykg.config as _cfg
+
+    assert "temperature" not in _cfg.RAW.get("llm", {})
+
+
+# ---------------------------------------------------------------------------
+# temperature — live smoke tests
+#
+# These prove the parameter is accepted by the real APIs rather than 400-ing,
+# which no amount of mock-payload assertion can establish. Each skips cleanly
+# when its key is absent, and all are excluded from default runs by -m "not live".
+# ---------------------------------------------------------------------------
+
+
+def _load_api_key(*names: str) -> str | None:
+    """First of `names` resolvable from the environment or .env.mykg.
+
+    Delegates to conftest's _load_key — the canonical loader already shared with
+    the healthiness suite. pytest does not load .env.mykg the way the CLI does,
+    so tests needing a real key have to read it themselves.
+    """
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "_mykg_test_conftest", pathlib.Path(__file__).parent / "conftest.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    for name in names:
+        key = module._load_key(name)
+        if key:
+            return key
+    return None
+
+
+_LIVE_PROMPT = ("Reply with JSON only.", 'Return exactly {"pong": true}')
+
+
+@pytest.mark.live
+def test_anthropic_live_accepts_temperature():
+    key = _load_api_key("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
+    if not key:
+        pytest.skip("ANTHROPIC_API_KEY not set")
+
+    from mykg.llm.anthropic_adapter import AnthropicAdapter
+
+    adapter = AnthropicAdapter(
+        model=os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-5"),
+        max_tokens=64,
+        timeout=120,
+        api_key=key,
+        temperature=0.0,
+    )
+    try:
+        out = adapter.complete(*_LIVE_PROMPT, context_label="live_temperature")
+    except Exception as exc:  # noqa: BLE001 - re-raised unless it is a quota 429
+        _skip_if_quota_exhausted(exc)
+        raise
+    assert out.strip(), "expected a non-empty response with temperature=0.0"
+
+
+@pytest.mark.live
+def test_openai_live_accepts_temperature_on_ordinary_model():
+    """A non-reasoning model actually receives the temperature."""
+    key = _load_api_key("OPENAI_API_KEY")
+    if not key:
+        pytest.skip("OPENAI_API_KEY not set")
+
+    from mykg.llm.openai_adapter import OpenAIAdapter
+
+    adapter = OpenAIAdapter(
+        model=os.environ.get("OPENAI_TEMPERATURE_MODEL", "gpt-4o-mini"),
+        max_tokens=64,
+        timeout=120,
+        api_key=key,
+        temperature=0.0,
+    )
+
+    # The mirror of the reasoning-model test below: here the value must actually
+    # be transmitted, not merely accepted.
+    sent: list[dict] = []
+    original = adapter._client.chat.completions.create
+
+    def _spy(**kwargs):
+        sent.append(kwargs)
+        return original(**kwargs)
+
+    adapter._client.chat.completions.create = _spy
+
+    try:
+        out = adapter.complete(*_LIVE_PROMPT, context_label="live_temperature")
+    except Exception as exc:  # noqa: BLE001 - re-raised unless it is a quota 429
+        _skip_if_quota_exhausted(exc)
+        raise
+
+    assert out.strip(), "expected a non-empty response with temperature=0.0"
+    assert sent[0].get("temperature") == 0.0, "temperature was not sent to a standard model"
+
+
+@pytest.mark.live
+def test_openai_live_reasoning_model_succeeds_because_temperature_is_omitted():
+    """The guard in action: a gpt-5 model would 400 if temperature were sent.
+
+    This is the case that protects mykg's shipped default profile.
+    """
+    key = _load_api_key("OPENAI_API_KEY")
+    if not key:
+        pytest.skip("OPENAI_API_KEY not set")
+
+    from mykg.llm.openai_adapter import OpenAIAdapter
+
+    adapter = OpenAIAdapter(
+        model=os.environ.get("OPENAI_REASONING_MODEL", "gpt-5-mini"),
+        max_tokens=2000,
+        timeout=180,
+        api_key=key,
+        temperature=0.0,
+    )
+
+    # Success alone is a weak assertion — it would also pass if OpenAI silently
+    # started accepting temperature on this family. Record what actually went
+    # over the wire so the omission itself is what is verified.
+    sent: list[dict] = []
+    original = adapter._client.chat.completions.create
+
+    def _spy(**kwargs):
+        sent.append(kwargs)
+        return original(**kwargs)
+
+    adapter._client.chat.completions.create = _spy
+
+    try:
+        out = adapter.complete(*_LIVE_PROMPT, context_label="live_temperature_omitted")
+    except Exception as exc:  # noqa: BLE001 - re-raised unless it is a quota 429
+        _skip_if_quota_exhausted(exc)
+        raise
+
+    assert out.strip(), "expected a non-empty response; temperature should have been omitted"
+    assert sent, "the adapter never issued a request"
+    assert "temperature" not in sent[0], (
+        "temperature reached a reasoning model; it returns 400 "
+        "\"Only the default (1) value is supported\" for an explicit value"
+    )
+
+
+@pytest.mark.live
+def test_openrouter_live_accepts_temperature():
+    key = _load_api_key("OPENROUTER_API_KEY", "OPENROUTER_AUTH_TOKEN")
+    if not key:
+        pytest.skip("OPENROUTER_API_KEY not set")
+
+    from mykg.llm.openrouter_adapter import OpenRouterAdapter
+
+    # openrouter/free routes to whatever free model is currently available, which
+    # may be a reasoning model that spends output tokens on thinking. A 64-token
+    # budget truncates those before any JSON is emitted (finish_reason=length),
+    # so this needs the same headroom as the other reasoning-capable live tests.
+    adapter = OpenRouterAdapter(
+        model=os.environ.get("OPENROUTER_MODEL", "openrouter/free"),
+        max_tokens=2000,
+        timeout=180,
+        api_key=key,
+        temperature=0.0,
+    )
+    try:
+        out = adapter.complete(*_LIVE_PROMPT, context_label="live_temperature")
+    except Exception as exc:  # noqa: BLE001 - re-raised unless it is a quota 429
+        _skip_if_quota_exhausted(exc)
+        raise
+    assert out.strip(), "expected a non-empty response with temperature=0.0"
+
+
+@pytest.mark.live
+def test_gemini_live_accepts_temperature():
+    key = _load_api_key("GEMINI_API_KEY", "GOOGLE_API_KEY")
+    if not key:
+        pytest.skip("GEMINI_API_KEY not set")
+
+    from mykg.llm.gemini_adapter import GeminiAdapter
+
+    adapter = GeminiAdapter(
+        model=os.environ.get("GEMINI_MODEL", "gemini-3.7-flash"),
+        max_tokens=2000,
+        timeout=120,
+        api_key=key,
+        temperature=0.0,
+    )
+    try:
+        out = adapter.complete(*_LIVE_PROMPT, context_label="live_temperature")
+    except Exception as exc:  # noqa: BLE001 - re-raised unless it is a quota 429
+        _skip_if_quota_exhausted(exc)
+        raise
+    assert out.strip()
+    assert json.loads(out)["pong"] is True
+
+
+def test_openai_recovers_when_a_single_400_names_both_parameters():
+    """A 400 naming max_tokens AND temperature must be fixed in one retry.
+
+    Handling these as mutually exclusive branches meant the max_tokens retry
+    re-sent the still-rejected temperature; that second error was raised from
+    inside the except block, escaped uncaught, and left nothing latched — so
+    every subsequent call repeated the same doomed sequence.
+    """
+    ok = MagicMock()
+    ok.choices[0].message.content = "ok"
+    ok.choices[0].finish_reason = "stop"
+
+    both = (
+        "Unsupported parameter: 'max_tokens' is not supported; use "
+        "'max_completion_tokens' instead. Also 'temperature' is not supported."
+    )
+
+    with patch("openai.OpenAI") as mock_cls:
+        mock_cls.return_value = client = MagicMock()
+        client.chat.completions.create.side_effect = [_openai_bad_request(both), ok]
+
+        from mykg.llm.openai_adapter import OpenAIAdapter
+
+        adapter = OpenAIAdapter(
+            model="gpt-4o", max_tokens=4096, timeout=30, api_key="k", temperature=0.5
+        )
+        assert adapter.complete("sys", "user") == "ok"
+
+    assert client.chat.completions.create.call_count == 2
+    retry = client.chat.completions.create.call_args_list[1][1]
+    assert retry["max_completion_tokens"] == 4096
+    assert "temperature" not in retry
+    assert adapter._temperature_rejected is True
+
+
+def test_openai_incidental_temperature_mention_does_not_latch():
+    """A top_p/temperature conflict is not a rejection; the value must survive."""
+    import openai
+
+    with patch("openai.OpenAI") as mock_cls:
+        mock_cls.return_value = client = MagicMock()
+        client.chat.completions.create.side_effect = _openai_bad_request(
+            "temperature and top_p cannot both be specified"
+        )
+
+        from mykg.llm.openai_adapter import OpenAIAdapter
+
+        adapter = OpenAIAdapter(
+            model="gpt-4o", max_tokens=4096, timeout=30, api_key="k", temperature=0.5
+        )
+        with pytest.raises(openai.BadRequestError):
+            adapter.complete("sys", "user")
+
+    assert client.chat.completions.create.call_count == 1
+    assert adapter._temperature_rejected is False
+
+
+def test_openrouter_recovers_when_model_rejects_temperature(caplog):
+    """OpenRouter proxies reasoning models beyond the openai/* families."""
+    import logging
+
+    ok = MagicMock()
+    ok.choices[0].message.content = "ok"
+    ok.choices[0].finish_reason = "stop"
+
+    with patch("openai.OpenAI") as mock_cls:
+        mock_cls.return_value = client = MagicMock()
+        client.chat.completions.create.side_effect = [
+            _openai_bad_request("'temperature' is not supported with this model"),
+            ok,
+            ok,
+        ]
+
+        from mykg.llm.openrouter_adapter import OpenRouterAdapter
+
+        adapter = OpenRouterAdapter(
+            model="deepseek/deepseek-r1",
+            max_tokens=4096,
+            timeout=30,
+            api_key="k",
+            temperature=0.0,
+        )
+        with caplog.at_level(logging.WARNING, logger="mykg.llm.openrouter_adapter"):
+            assert adapter.complete("sys", "user") == "ok"
+        # Latched: the next call omits temperature without a failed request.
+        adapter.complete("sys", "user")
+
+    assert client.chat.completions.create.call_count == 3
+    assert "temperature" not in client.chat.completions.create.call_args_list[1][1]
+    assert "temperature" not in client.chat.completions.create.call_args_list[2][1]
+    assert "rejected an explicit temperature" in caplog.text
+
+
+def test_openrouter_unrelated_bad_request_still_raises():
+    import openai
+
+    with patch("openai.OpenAI") as mock_cls:
+        mock_cls.return_value = client = MagicMock()
+        client.chat.completions.create.side_effect = _openai_bad_request("Invalid 'messages'")
+
+        from mykg.llm.openrouter_adapter import OpenRouterAdapter
+
+        adapter = OpenRouterAdapter(
+            model="openrouter/free", max_tokens=4096, timeout=30, api_key="k", temperature=0.0
+        )
+        with pytest.raises(openai.BadRequestError):
+            adapter.complete("sys", "user")
+
+    assert client.chat.completions.create.call_count == 1
+
+
+# ---------------------------------------------------------------------------
+# temperature — configurable unsupported-prefix list
+# ---------------------------------------------------------------------------
+
+
+def _openai_wire(raw: dict) -> dict:
+    """Run one mocked call through load_adapter and return the request kwargs."""
+    with patch("openai.OpenAI") as mock_cls:
+        mock_cls.return_value = client = _openai_client()
+        from mykg.llm.config import load_adapter
+
+        load_adapter(_raw=raw).complete("sys", "user")
+    return client.chat.completions.create.call_args[1]
+
+
+def _openai_raw(**llm) -> dict:
+    base = {"model": "gpt-5-mini", "max_output_tokens": 100, "timeout": 30, "temperature": 0.0}
+    return {"provider": "openai", "llm": {**base, **llm}}
+
+
+def test_shipped_config_uses_the_default_prefix_list(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    assert "temperature" not in _openai_wire(_openai_raw())
+
+
+def test_config_can_disable_the_prefix_guard(monkeypatch):
+    """An empty list means the endpoint accepts temperature on every model."""
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    kwargs = _openai_wire(_openai_raw(temperature_unsupported_prefixes=[]))
+    assert kwargs["temperature"] == 0.0
+
+
+def test_config_can_add_a_family_mykg_does_not_know(monkeypatch):
+    """The point of the knob: a new rejecting family needs no code change."""
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    kwargs = _openai_wire(_openai_raw(model="gpt-4o", temperature_unsupported_prefixes=["gpt-4o"]))
+    assert "temperature" not in kwargs
+
+
+def test_config_prefixes_are_normalised(monkeypatch):
+    """Case and stray whitespace in YAML must not defeat the match."""
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    kwargs = _openai_wire(_openai_raw(temperature_unsupported_prefixes=["  GPT-5 "]))
+    assert "temperature" not in kwargs
+
+
+def test_a_string_prefix_list_is_rejected(monkeypatch):
+    """`prefixes: gpt-5` in YAML would otherwise match per-character."""
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    with pytest.raises(ValueError, match="must be a list"):
+        _openai_wire(_openai_raw(temperature_unsupported_prefixes="gpt-5"))
+
+
+def test_openrouter_honours_configured_prefixes(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    raw = {
+        "provider": "openrouter",
+        "llm": {
+            "model": "deepseek/deepseek-r1",
+            "max_output_tokens": 100,
+            "timeout": 30,
+            "temperature": 0.0,
+            "temperature_unsupported_prefixes": ["deepseek-r1"],
+        },
+    }
+    with patch("openai.OpenAI") as mock_cls:
+        mock_cls.return_value = client = _openai_client()
+        from mykg.llm.config import load_adapter
+
+        load_adapter(_raw=raw).complete("sys", "user")
+    assert "temperature" not in client.chat.completions.create.call_args[1]
+
+
+def test_shipped_config_has_no_temperature_prefix_key():
+    """The knob is internal: readable, but never shipped as an active key."""
+    import mykg.config as _cfg
+
+    assert "temperature_unsupported_prefixes" not in _cfg.RAW.get("llm", {})
+
+
+def test_shipped_yaml_files_never_mention_temperature():
+    """The configs *as committed to this repo* must not mention temperature.
+
+    The default lives in code (DEFAULT_TEMPERATURE), not config, and the shipped
+    files are left untouched by design. A comment is still an edit, so the check
+    is on raw text rather than the parsed mapping.
+
+    Scoped to git's committed content, not the file on disk: a user is expressly
+    told in the README to add `temperature:` to their own working copy to restore
+    per-provider defaults, and doing so must not fail this suite.
+    """
+    import subprocess
+    from pathlib import Path
+
+    repo_root = Path(__file__).parent.parent
+    tracked = ["mykg_config.yaml", "src/mykg/data/mykg_config.yaml"]
+
+    for rel in tracked:
+        committed = subprocess.run(
+            ["git", "show", f"HEAD:{rel}"],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        if committed.returncode != 0:
+            pytest.skip(f"cannot read {rel} from git (not a checkout?)")
+        assert "temperature" not in committed.stdout.lower(), (
+            f"{rel} mentions temperature as committed; the shipped configs are "
+            "left untouched by design — document it in docs/architecture.md"
+        )
+
+
+# ---------------------------------------------------------------------------
+# temperature — the 0.0 default reaches the wire
+# ---------------------------------------------------------------------------
+
+
+def test_unconfigured_standard_model_sends_zero(monkeypatch):
+    """The point of the default: deterministic extraction with no config."""
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    kwargs = _openai_wire(
+        {"provider": "openai", "llm": {"model": "gpt-4o", "max_output_tokens": 100, "timeout": 30}}
+    )
+    assert kwargs["temperature"] == 0.0
+
+
+def test_unconfigured_reasoning_model_still_omits(monkeypatch):
+    """The prefix guard outranks the default, so the shipped gpt-5 profile does
+    not start 400-ing the moment the default became a real value."""
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    kwargs = _openai_wire(
+        {
+            "provider": "openai",
+            "llm": {"model": "gpt-5-mini", "max_output_tokens": 100, "timeout": 30},
+        }
+    )
+    assert "temperature" not in kwargs
+
+
+def test_shipped_default_profile_resolves_the_zero_default(monkeypatch):
+    """End-to-end on whatever profile the shipped config actually selects.
+
+    The wire assertion is conditional on the active model, deliberately: pinning
+    "temperature is absent" would silently go vacuous if `profile:` were switched
+    to a provider with no prefix guard, un-guarding the regression it exists to
+    catch. What holds for every profile is that the default resolves to 0.0 and
+    that the payload agrees with the guard's verdict for that model.
+    """
+    # monkeypatch, not os.environ: a leaked fake key would make a later live
+    # test attempt a real call with "test-key" instead of skipping cleanly.
+    for var in (
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "OPENROUTER_API_KEY",
+        "GEMINI_API_KEY",
+    ):
+        monkeypatch.setenv(var, "test-key")
+
+    from mykg.llm.config import load_adapter
+    from mykg.llm.temperature import DEFAULT_TEMPERATURE, temperature_unsupported
+
+    adapter = load_adapter()
+    assert adapter._temperature == DEFAULT_TEMPERATURE == 0.0
+
+    model = getattr(adapter, "_model", "")
+    if not hasattr(adapter, "_client"):
+        pytest.skip(f"active profile {model!r} has no HTTP client to inspect")
+
+    with patch.object(adapter, "_client") as client:
+        response = MagicMock()
+        response.choices[0].message.content = "ok"
+        response.choices[0].finish_reason = "stop"
+        client.chat.completions.create.return_value = response
+        client.messages.create.return_value = MagicMock(content=[MagicMock(text="ok")])
+        try:
+            adapter.complete("sys", "user")
+        except Exception:  # noqa: BLE001 - unfamiliar client shape; nothing to assert
+            pytest.skip(f"active profile {model!r} does not expose an inspectable payload")
+
+        # Providers differ in call shape: OpenAI-compatible clients use
+        # chat.completions.create, Anthropic uses messages.create.
+        for call in (client.chat.completions.create, client.messages.create):
+            if call.call_args is not None:
+                kwargs = call.call_args[1]
+                break
+        else:
+            pytest.skip(f"active profile {model!r} issued no inspectable request")
+
+    if temperature_unsupported(model):
+        assert "temperature" not in kwargs, f"{model} rejects temperature; it must be omitted"
+    else:
+        assert kwargs["temperature"] == 0.0, f"{model} accepts temperature; 0.0 must be sent"
+
+
+def test_explicit_config_still_overrides_the_default(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    kwargs = _openai_wire(
+        {
+            "provider": "openai",
+            "llm": {
+                "model": "gpt-4o",
+                "max_output_tokens": 100,
+                "timeout": 30,
+                "temperature": 0.7,
+            },
+        }
+    )
+    assert kwargs["temperature"] == 0.7
+
+
+def test_explicit_null_temperature_restores_provider_default(monkeypatch):
+    """An explicit `temperature:` (empty) in YAML parses as None and means
+    "send nothing" — the documented escape hatch back to pre-0.4.5 behaviour.
+
+    This works because .get(key, default) returns a stored None rather than the
+    default, so the distinction between "absent" and "explicitly null" survives.
+    """
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    kwargs = _openai_wire(
+        {
+            "provider": "openai",
+            "llm": {
+                "model": "gpt-4o",
+                "max_output_tokens": 100,
+                "timeout": 30,
+                "temperature": None,
+            },
+        }
+    )
+    assert "temperature" not in kwargs

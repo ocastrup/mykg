@@ -200,3 +200,57 @@ def test_config_creates_claude_cli_adapter():
     assert isinstance(adapter, ClaudeCLIAdapter)
     assert adapter._max_tokens == 2048
     assert adapter._timeout == 120
+
+
+# ---------------------------------------------------------------------------
+# temperature — accepted for interface uniformity, deliberately unused
+# ---------------------------------------------------------------------------
+
+
+def test_claude_cli_accepts_temperature_without_changing_argv():
+    """`claude -p` has no temperature flag, so the argv must be byte-identical."""
+    with patch("shutil.which", return_value="/usr/bin/claude"):
+        with patch("subprocess.run", return_value=_make_proc(stdout=_envelope())) as run:
+            ClaudeCLIAdapter(max_tokens=4096, timeout=30).complete("sys", "user")
+            argv_without = run.call_args[0][0]
+
+        with patch("subprocess.run", return_value=_make_proc(stdout=_envelope())) as run:
+            adapter = ClaudeCLIAdapter(max_tokens=4096, timeout=30, temperature=0.2)
+            adapter.complete("sys", "user", temperature=0.9)
+            argv_with = run.call_args[0][0]
+
+    assert argv_with == argv_without
+    assert not any("temperature" in str(a) for a in argv_with)
+
+
+def test_claude_cli_complete_accepts_temperature_kwarg():
+    """The adapter must stay callable through llm_complete_with_retry."""
+    with patch("shutil.which", return_value="/usr/bin/claude"):
+        with patch("subprocess.run", return_value=_make_proc(stdout=_envelope())):
+            adapter = ClaudeCLIAdapter(max_tokens=4096, timeout=30)
+            assert adapter.complete("sys", "user", temperature=0.0) == '{"nodes": []}'
+
+
+def test_claude_cli_discards_the_zero_default():
+    """DEFAULT_TEMPERATURE reaches this adapter but cannot be acted on.
+
+    `claude -p` has no temperature flag, so the README's reproducibility
+    guarantee explicitly excludes this profile. Pinned here so the code and that
+    caveat cannot drift apart.
+    """
+    from mykg.llm.config import load_adapter
+    from mykg.llm.temperature import DEFAULT_TEMPERATURE
+
+    raw = {
+        "provider": "claude-cli",
+        "llm": {"model": "sonnet", "max_output_tokens": 4096, "timeout": 30},
+    }
+    with patch("shutil.which", return_value="/usr/bin/claude"):
+        adapter = load_adapter(_raw=raw)
+        assert adapter._temperature == DEFAULT_TEMPERATURE
+
+        with patch("subprocess.run", return_value=_make_proc(stdout=_envelope())) as run:
+            adapter.complete("sys", "user")
+
+    argv = run.call_args[0][0]
+    assert not any("temperature" in str(a) for a in argv)

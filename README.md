@@ -3,13 +3,14 @@
   <img src="https://gcore.jsdelivr.net/gh/SenolIsci/mykg@main/docs/mykg-logo-text.svg" width="400px" style="vertical-align:middle;">
 </p>
 
-# myKG — Knowledge Graph Extractor
+# myKG — The Knowledge Graph Engine
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![CI](https://github.com/SenolIsci/mykg/actions/workflows/ci.yml/badge.svg)](https://github.com/SenolIsci/mykg/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/SenolIsci/mykg/branch/main/graph/badge.svg)](https://codecov.io/gh/SenolIsci/mykg)
-[![Providers](https://img.shields.io/badge/LLM-Anthropic%20%7C%20OpenAI%20%7C%20Ollama%20%7C%20OpenRouter-orange.svg)](#configuration)
+[![Providers](https://img.shields.io/badge/LLM-Anthropic%20%7C%20OpenAI%20%7C%20Gemini%20%7C%20Ollama%20%7C%20OpenRouter-orange.svg)](#configuration)
+[![Agent](https://img.shields.io/badge/Agent-Claude%20Code-green.svg)](docs/agent-mode.md)
 [![PyPI version](https://img.shields.io/pypi/v/mykg.svg)](https://pypi.org/project/mykg/)
 [![Downloads](https://img.shields.io/pepy/dt/mykg?color=blue&label=downloads)](https://pepy.tech/project/mykg)
 [![GitHub Stars](https://img.shields.io/github/stars/SenolIsci/mykg?style=flat-square&logo=github)](https://github.com/SenolIsci/mykg/stargazers)
@@ -23,6 +24,14 @@
 <p align="center">
   <img src="https://gcore.jsdelivr.net/gh/SenolIsci/mykg@main/docs/mykg_logo_panel.png" width="95%" style="vertical-align:middle;">
 </p>
+
+## Updates
+
+- **Unreleased** — Schema drift detection and pruning: `mykg detect-schema-drift` reports concepts and properties the graph no longer uses, and `mykg prune-schema` removes them (with `--preview`, an editable plan file, and a backup). The walkthrough gains a Schema Health section and the MCP server a read-only `mykg_schema_drift` tool. See [Schema Drift & Pruning](#schema-drift--pruning).
+
+- **v0.4.9** — The `nodes.jsonl`, `edges.jsonl` and `knowledge_graph.ttl` exports now stream to disk record by record instead of building the whole file in memory first, so peak memory stays flat as the graph grows.
+
+- **v0.4.8** — `mykg_search_nodes` and `mykg_query_graph`'s seed selection now use BM25 instead of a linear substring scan, ~2,800x faster at 100K nodes (0.5ms vs. 1.4s per query) and no longer degrading to minutes per query as the graph grows. 
 
 ## Contents
 
@@ -49,6 +58,7 @@
     - [Incremental Schema Growth](#incremental-schema-growth---append-with-grow-schema)
   - [Merging Sessions](#merging-sessions)
   - [Walkthrough Report](#walkthrough-report)
+  - [Schema Drift & Pruning](#schema-drift--pruning)
   - [Obsidian Vault Export](#obsidian-vault-export)
   - [Neo4j LOAD CSV Export](#neo4j-load-csv-export)
 - [MCP (Model Context Protocol) Server](#mcp-model-context-protocol-server)
@@ -57,6 +67,8 @@
   - [claude-cli profile](#claude-cli-profile)
 - [Roadmap](#roadmap)
 - [Development](#development)
+  - [Testing](#testing)
+  - [Healthiness check](#healthiness-check)
 - [Design](#design)
 - [License](#license)
 
@@ -66,9 +78,9 @@ MyKG builds trustworthy knowledge graphs through a self-evolving ontology that c
 ### Ontology-Guided Extraction
 - **Schema-guided knowledge graph generation** — the extracted graph is always grounded in a formal RDFS/OWL schema: concept types, property names, domain/range constraints, and the is-a hierarchy are explicit and inspectable before any entity is extracted
 
-- **AI coding assistant friendly** — designed for smooth use alongside AI coding assistants such as [Claude Code](https://claude.ai/code); run extractions, inspect outputs, and iterate on your knowledge graph without leaving your coding environment; see [Using mykg with Claude Code](#using-mykg-with-claude-code)
+- **AI coding assistant friendly** — designed for smooth use alongside AI coding assistants such as [Claude Code](https://claude.ai/code); Use the Claude Code Skill to run extractions, inspect outputs, and iterate on your knowledge graph without leaving your coding environment; see [Using mykg with Claude Code](#using-mykg-with-claude-code)
 - **Second brain for AI coding assistants** — the Obsidian vault output turns your extracted knowledge graph into a directory of wikilinked Markdown notes that any AI coding assistant can read as project context; point Claude Code, Cursor, or Copilot at `output/obsidian_vault/` and ask questions, trace relationships, and get answers grounded in your own documents
-- **MCP server for desktop AI apps** — run `mykg mcp-serve` to expose your knowledge graph via the [Model Context Protocol](https://modelcontextprotocol.io/); integrates with [Claude Desktop](https://claude.ai/download), [Cherry Studio](https://cherry-ai.com), and any MCP-compatible client — 13 query tools let LLMs search entities, explore relationships, find paths, traverse the graph, and read wiki notes directly from your extracted knowledge; see [MCP Server](#mcp-model-context-protocol-server)
+- **MCP server for desktop AI apps** — run `mykg mcp-serve` to expose your knowledge graph via the [Model Context Protocol](https://modelcontextprotocol.io/); integrates with [Claude Desktop](https://claude.ai/download), [Cherry Studio](https://cherry-ai.com), and any MCP-compatible client — 16 query tools let LLMs search entities, explore relationships, find paths, traverse the graph, and read wiki notes directly from your extracted knowledge; see [MCP Server](#mcp-model-context-protocol-server)
 - **Incremental updates** — append new files to an existing session, extracting only what changed. Optionally grow the schema from new documents while preserving existing concepts and properties
 - **Resumable pipeline** — every stage persists intermediate state; re-enter at any step after a crash or edit
 - **Session isolation** — each run is fully self-contained; inputs, intermediate state, outputs, and logs co-located
@@ -100,7 +112,7 @@ MyKG builds trustworthy knowledge graphs through a self-evolving ontology that c
 
 ### Graph & Output
 
-- **Provider-agnostic** — works with Anthropic (Claude), OpenAI (GPT), Ollama (local), OpenRouter, or the `claude` CLI
+- **Provider-agnostic** — works with Anthropic (Claude), OpenAI (GPT), Google Gemini, Ollama (local), OpenRouter, or the `claude` CLI
 - **Five output families** — JSONL for Neo4j/NetworkX/RAG, Turtle RDF for OWL toolchains, NetworkX multi-format for graph analysis, Obsidian vault for linked personal knowledge management, and an optional Neo4j LOAD CSV bundle (plain-header CSVs + paste-and-run Cypher script for Neo4j Browser / `cypher-shell`)
 - **Obsidian vault — second brain for AI coding assistants** — every extracted entity becomes a wikilinked Markdown note in `output/obsidian_vault/`; open it in [Obsidian](https://obsidian.md) to navigate the graph with backlinks and Graph View, or point your AI coding assistant (Claude Code, Cursor, Copilot) at the vault folder so it can answer questions, trace relationships, and reason over your knowledge base in natural language
 - **Interactive HTML graph** — node/edge filtering, search, hover popups; opens directly in a browser
@@ -108,7 +120,7 @@ MyKG builds trustworthy knowledge graphs through a self-evolving ontology that c
 
 ## Quick Start
 
-Requires Python 3.11+ (developed on macOS; automated CI runs the test suite on Ubuntu and Windows), and one of: an Anthropic/OpenAI/OpenRouter API key, Ollama running locally, or the `claude` CLI.
+Requires Python 3.11+ (developed on macOS; automated CI runs the test suite on Ubuntu and Windows), and one of: an Anthropic/OpenAI/Gemini/OpenRouter API key, Ollama running locally, or the `claude` CLI.
 
 ### Install from PyPI
 
@@ -160,6 +172,8 @@ mykg extract-graph my_notes/
 | [`mykg extract-graph`](#extract-pipeline) | Run the two-pass extraction pipeline over a directory |
 | `mykg approve-schema` | Write `schema_approved.flag` to unblock the `human_review` gate after editing `schema.json` (used with `--review`, see [Human Review Gate](#human-review-gate---review)) |
 | [`mykg walkthrough`](#walkthrough-report) | Regenerate `walkthrough.md` for an existing session |
+| [`mykg detect-schema-drift`](#schema-drift--pruning) | Report schema concepts/properties with no instances in the graph (read-only, no LLM) |
+| [`mykg prune-schema`](#schema-drift--pruning) | Remove unused concepts/properties from the session schema; `--preview` shows the plan, `--plan <file>` applies an edited one (no LLM) |
 | [`mykg merge-graphs`](#merging-sessions) | Merge two independently-produced sessions into one unified graph |
 | [`mykg parse-docs`](#standalone-document-conversion-mykg-parse-docs) | Standalone MinerU/markdownify document-to-Markdown conversion |
 | [`mykg fetch-web`](#website--repo-fetching-mykg-fetch-web) | Crawl a website or clone a GitHub repo into an `extract-graph`-ready folder |
@@ -194,7 +208,7 @@ mykg init --profile openrouter-free --model google/llama-4-maverick --api-key sk
 
 The wizard walks you through three prompts:
 
-1. **Profile** — choose your LLM provider (OpenRouter, Anthropic, OpenAI, Ollama, Claude CLI, or Agent / Claude Code skill)
+1. **Profile** — choose your LLM provider (OpenRouter, Anthropic, OpenAI, Gemini, Ollama, Claude CLI, or Agent / Claude Code skill)
 2. **Model** — accept the default or type any model slug for that provider *(skipped in agent mode — the host Claude Code session is the LLM)*
 3. **API key** — paste your key (skipped for Ollama, Claude CLI, and agent mode)
 
@@ -204,6 +218,7 @@ The wizard walks you through three prompts:
 |---|---|---|---|
 | Anthropic (Claude) | `anthropic-claude` | `ANTHROPIC_API_KEY` | Recommended for quality |
 | OpenAI | `openai` | `OPENAI_API_KEY` | |
+| Google Gemini | `gemini` | `GEMINI_API_KEY` | Implicit prompt caching is automatic. Profile ships the same token budgets as `openai`; raise `llm.context_window` to use Gemini's full 1M window |
 | Ollama | `ollama-local` | — | Local inference, no key needed |
 | OpenRouter | `openrouter-free` | `OPENROUTER_API_KEY` | Access many models via one key |
 | Claude CLI | `claude-cli` | — | Uses `claude -p` subprocess; serial only |
@@ -268,7 +283,7 @@ Controls how source files are packed into Pass 2 LLM calls (set per profile in `
 
 - **`batch_chunks`** *(default)* — packs chunks across files into token-bounded batches, ignoring file boundaries; best throughput and extraction density.
 - **`concat`** — merges whole small files into directory-grouped batches (one LLM call per window) for cross-file context.
-- **`per_file`** — one file per extraction unit; cleanest provenance (every entity traces to one source file).
+- **`per_file`** — one file per extraction unit; cleanest provenance (every entity traces to one source file). Fully updates a **modified** file on `--append` — its old nodes are cleanly replaced on re-extraction. (`batch_chunks` with `batch_per_file: true` gives the same guarantee; mixed-batch modes may retain stale copies — see [docs/architecture.md](docs/architecture.md#--append-change-detection-limits).)
 
 See [docs/architecture.md](docs/architecture.md#choosing-a-prep-mode) for the full comparison.
 
@@ -286,9 +301,37 @@ A `429` surfaces in the log as a retry warning like:
 - `pass2.max_workers` — concurrent per-file extraction calls
 - `orphan_pass.max_workers` — concurrent orphan-connection calls
 
-Lower these (e.g. from `8` down to `2`–`4`) in the active profile to reduce concurrent requests. This is especially likely on `openrouter-free` (free-tier models have very low per-minute caps) and on lower-tier `anthropic-claude`/`openai` accounts. `llm.retry_429_max` / `llm.retry_429_base_delay` control automatic backoff on a 429, but a persistent 429 is a signal to reduce `max_workers`, not just retry harder. `claude-cli` is unaffected — it is serial by design (`max_workers: 1`); it doesn't hit API rate limits since there's no API call. `agent-claude-code` is not API rate-limited either (no API key involved), but it is not serial — its default profile sets `pass1`/`pass2`/`orphan_pass` `max_workers` > 1 (configurable, like any other profile), since the skill dispatches multiple subagents per wave.
+Lower these (e.g. from `8` down to `2`–`4`) in the active profile to reduce concurrent requests. This is especially likely on `openrouter-free` (free-tier models have very low per-minute caps), on `gemini` with a free-tier key (5 requests/minute/model — drop `pass1`/`pass2`/`orphan_pass` to `1`–`2`), and on lower-tier `anthropic-claude`/`openai` accounts. `llm.retry_429_max` / `llm.retry_429_base_delay` control automatic backoff on a 429, but a persistent 429 is a signal to reduce `max_workers`, not just retry harder. `claude-cli` is unaffected — it is serial by design (`max_workers: 1`); it doesn't hit API rate limits since there's no API call. `agent-claude-code` is not API rate-limited either (no API key involved), but it is not serial — its default profile sets `pass1`/`pass2`/`orphan_pass` `max_workers` > 1 (configurable, like any other profile), since the skill dispatches multiple subagents per wave.
 
 **Also check your quota/credits.** Some providers return `429` when your account has exhausted its token quota or spending balance, not only for request cadence. If lowering `max_workers` doesn't help and the 429s persist from the very first call, **check that your account still has available tokens/credits** (e.g. the OpenAI/Anthropic billing dashboard, or your OpenRouter balance). No `max_workers` value will clear a 429 caused by a depleted balance — top up or switch to a profile with quota (e.g. `ollama-local` for local inference, or `claude-cli` which bills via your Claude Pro/Max plan instead of the API).
+
+
+### Non-Reproducible Extraction (Different Graph Each Run)
+
+If the same corpus produces a different schema or a different set of nodes and
+edges on each run, sampling temperature is the usual cause.
+
+myKG sends `temperature: 0.0` on every LLM call so extraction is repeatable —
+it is a structured-output task, not a creative one, and provider defaults
+(typically ~1.0) work against that. Two cases fall outside it, and in both the
+provider's own sampling applies:
+
+- **Models that reject an explicit temperature** — OpenAI's o-series and gpt-5
+  reasoning families — have it omitted automatically and use their own fixed
+  sampling.
+- **`claude-cli` and `agent`** have no temperature control at all: `claude -p`
+  exposes no such flag, and the host Claude Code session servicing the agent
+  inbox has no sampling dial. These two profiles accept the setting and ignore
+  it, so extraction on them is **not** reproducible in the sense above.
+
+If you need reproducibility, switch to a profile whose provider exposes
+temperature (`anthropic-claude`, `openai` on a non-reasoning model, `gemini`,
+`ollama-local`, `openrouter-free`).
+
+> Changed in 0.4.5 — earlier versions sent no temperature at all and inherited
+> each provider's default. If you were relying on that, extraction output will
+> shift. To restore the old behaviour, set an explicit empty `temperature:` in
+> the active profile's `llm:` block; a `null` value means "send nothing".
 
 
 ## Extract Pipeline
@@ -316,8 +359,10 @@ Everything else (`.py`, `.json`, `.yaml`, lock files, etc.) is ignored. Hidden d
 | `--session NAME` | Resume an existing session by folder name |
 | `--from-step NAME` | Delete a step's outputs and re-run from that point |
 | `--review` | Pause after Pass 1 for manual schema review |
-| `--append` | Skip Pass 1; re-run only on new/modified files |
-| `--append-with-grow-schema` | Like `--append`, but runs a locked Pass 1 over changed files to expand the schema |
+| `--append` | Skip Pass 1; extract NEW files only. Modified and deleted files are detected and warned about — add `--sync` to act on them |
+| `--sync` | With `--append`: reconcile the graph against the folder — re-extract MODIFIED files and remove DELETED ones |
+| `--update` | Shorthand for `--append --sync` |
+| `--append-with-grow-schema` | Like `--append`, but runs a locked Pass 1 over changed files to expand the schema. Composes with `--sync` |
 | `--pass1-schema-induction-only` | Run every step before Pass 2 (through `schema_flatten`), then stop — inspect/edit the schema before extracting |
 | `--pass2-kg-extraction-only` | Skip schema induction (requires an existing schema) and extract the full corpus through `validate_graph`. Unlike `--from-step pass2`, always re-derives `flattened_schema.json` first, so a hand-edited schema is picked up |
 | `--profile NAME` | Use a different LLM profile from `mykg_config.yaml` for THIS run only (config file untouched; re-resolves provider/model/workers/timeouts from that profile) |
@@ -479,6 +524,8 @@ Load in Protégé, query with SPARQL (Fuseki, GraphDB), or reason with HermiT/Pe
 - Hover popups with full attribute values
 - Resizable sidebar
 
+Not written when the graph exceeds `export.html_max_nodes` nodes (default 5000; `-1` disables the ceiling) — rendering a graph that large would overwhelm vis.js in the browser. Every other output format is still written in full. The key is read from the active profile's `pipeline.export:` block but is not present in the shipped config; add it there to override.
+
 ### NetworkX Formats (`networkx_output/`)
 
 | File | Format | Best for |
@@ -631,7 +678,10 @@ mykg extract-graph my_notes/ --thesaurus ontology/terms.skos.ttl
 
 - `skos:exactMatch` → silent collapse
 - `skos:closeMatch` → collapse with warning in `merge_log.json`
-- `skos:broader` / `skos:narrower` → advisory hints only
+- `skos:broader` → breaks ties when two proposals give a concept different parents; the declared broader term wins regardless of which proposal came first
+- `skos:narrower` → advisory hints only
+
+Name matching alone can't tell that two proposals disagree about the *structure* underneath a shared name, so those disagreements are recorded rather than silently dropped. `merge_log.json` (and `merge_manifest.json` for `merge-graphs`) gains a `parent_conflict`, `parent_conflict_resolved`, `domain_range_conflict`, or `attribute_synonym` entry whenever two proposals collapse onto one name but differ on a parent, a domain/range, or an attribute spelling. The first-seen value still wins — the log tells you what was discarded.
 
 ### Website / Repo Fetching (`mykg fetch-web`)
 
@@ -700,6 +750,62 @@ mykg extract-graph my_notes/ --session <name> --append
 
 The input directory may contain PDF, DOCX, HTML, TXT, and image files alongside `.md` — newly-added non-Markdown files are converted automatically during the append run (the same incremental `preprocess` step the initial run uses, subject to `preprocess.enabled`). No separate `mykg parse-docs` step is needed. Only new or changed source files are converted; unchanged ones are skipped by content hash.
 
+#### Reconciling Edits and Deletions (`--sync`)
+
+**`--append` adds; `--sync` reconciles.** Plain `--append` extracts *new* files
+only — it detects modified and deleted files and warns about them, but leaves
+the graph untouched. Add `--sync` to act on them:
+
+```bash
+mykg extract-graph my_notes/ --session <name> --append --sync
+```
+
+**All four combinations**, and what each does with the three kinds of change:
+
+| Command | New files | Modified files | Deleted files | Schema |
+|---|---|---|---|---|
+| `--append` | extracted | warn only | warn only | frozen |
+| `--append-with-grow-schema` | extracted | warn only | warn only | may grow |
+| `--append --sync` *(= `--update`)* | extracted | **re-extracted** | **removed** | frozen |
+| `--append-with-grow-schema --sync` | extracted | **re-extracted** | **removed** | may grow |
+
+The three flags are orthogonal axes: **`--append`** decides *which files* are
+processed, **`--sync`** decides *whether existing entries are reconciled*, and
+**`-with-grow-schema`** decides *whether the schema may grow*.
+
+`--sync` requires `--append`. `--append-with-grow-schema` already implies
+`--append`, so the last row needs only the two flags shown. **`--update` is
+shorthand for `--append --sync`:**
+
+```bash
+mykg extract-graph my_notes/ --session <name> --update
+```
+
+Reach for the fourth row when the new vocabulary lives in a document you
+**edited** rather than one you added — without `--sync`, the locked Pass 1 only
+sees new files, so a concept introduced by an edit never reaches the LLM.
+
+> **⚠️ Behaviour change:** before the release 0.4.3, plain `--append` re-extracted
+> modified files. It no longer does — add `--sync`. If your edits stop showing
+> up in the graph, that is why; the run will have logged a warning naming the
+> files.
+
+Deleting a file removes the nodes and edges that came only from it; nodes shared
+with a surviving file are **recomputed**, so their confidence and attribute
+values no longer reflect the removed document. Running `--sync` with nothing to
+reconcile costs nothing — it degrades to exactly plain `--append`, so it is safe
+to leave in a script.
+
+**Exact deletion needs `pass2.prep_mode: per_file`** or `batch_chunks` with
+`pass2.batch_per_file: true`. On the shipped default one LLM call covers several
+files, so a co-batched sibling may retain some of the deleted file's nodes.
+
+**Multiple source folders.** Each folder you append to a session is registered
+with its own subtree of `session/input/`, so two `fetch-web` crawls that both
+produce `index.md` no longer overwrite each other. `--sync` is scoped to the
+folder you name — reconciling one folder can never delete another's files, which
+is why no confirmation prompt or size cap is needed.
+
 #### Incremental Schema Growth (`--append-with-grow-schema`)
 
 Plain `--append` freezes the schema — Pass 1 is skipped, so new entity types and relationships are never induced. Use `--append-with-grow-schema` when you add documents that introduce concepts the current schema doesn't cover:
@@ -708,7 +814,7 @@ Plain `--append` freezes the schema — Pass 1 is skipped, so new entity types a
 mykg extract-graph my_notes/ --session <name> --append-with-grow-schema
 ```
 
-This runs a **locked Pass 1** over only the changed files: the LLM may add new concepts and properties but cannot rename, remove, or restructure existing ones. When the schema grows, a surgical back-fill re-extracts the old chunks most likely to contain instances of the new types (configurable via `append.grow_schema_backfill_top_k_chunks_per_type`, default 10; set 0 to disable). When the new documents don't introduce new types, the run collapses to a plain `--append` at no extra cost.
+This runs a **locked Pass 1** over only the changed files: the LLM may add new concepts and properties but cannot rename, remove, or restructure existing ones. When the schema grows, a surgical back-fill re-extracts the old chunks most likely to contain instances of the new types (configurable via `append.grow_schema_backfill_top_k_chunks_per_type`, default 10; set 0 to disable). When the new documents don't introduce new types, the run collapses to a plain `--append` at no extra cost — and with nothing to reconcile at all, the locked Pass 1 is skipped entirely (zero LLM calls). Note that "changed files" means *new* files unless you also pass `--sync`.
 
 The flag implies `--append` (no need to pass both) and is mutually exclusive with `--from-step` and `--base-schema` (the session's existing `schema.ttl` is auto-loaded as the locked base).
 
@@ -852,6 +958,107 @@ mykg walkthrough --session 2026-05-17T18-31-07
 
 Disable with `pipeline.report.enabled: false`.
 
+### Schema Drift & Pruning
+
+The induced schema only ever grows: Pass 1 and `--append-with-grow-schema` add concepts and properties, and nothing removes them. After you delete documents and run `--append --sync`, the graph shrinks but `schema.json` still declares the old vocabulary. That gap is *schema drift*. Two commands, neither of which calls an LLM or needs an API key, detect and repair it. "Unused" here means a concept with no instances or a property with no edges (not an "orphan" node, which has no edges).
+
+```bash
+mykg extract-graph docs/ --session s1 --append --sync   # 1. instances reconcile
+mykg detect-schema-drift --session s1                   # 2. report (writes intermediate/schema_drift.json)
+mykg prune-schema --session s1 --preview                # 3. show the plan (writes schema_prune_plan.json)
+mykg prune-schema --session s1                          # 4. apply every prunable entry
+```
+
+Example (a session whose `projects.md` was deleted; 5 declared concepts, 11 properties, graph uses 3 and 3):
+
+```
+$ mykg detect-schema-drift --session s1
+no locked schema recorded; treating all entries as unlocked
+declared concepts: Organization, Person, Team, Project, Service
+unused concepts: Project (0 instances), Service (0 instances)
+declared properties: 11 (8 unreferenced by active edges)
+  concept  Project: prunable - 0 instances, 0 in subtree
+  concept  Service: prunable - 0 instances, 0 in subtree
+  property owns_project: prunable - 0 edges; domain/range removed
+  ...
+10 entries prunable; see: mykg prune-schema --session s1 --preview
+
+$ mykg prune-schema --session s1 --preview
+Will be removed:
+  concept Project: 0 instances, 0 in subtree
+  concept Service: 0 instances, 0 in subtree
+  property owns_project: 0 edges; domain/range removed
+  ...
+  property partners_with: 0 edges
+  ...
+Totals: 5 concepts / 11 properties -> 3 / 3
+Warnings:
+  - A removed type is silently dropped from future extraction if the schema is frozen (plain --append). Use --append-with-grow-schema when its documents return.
+  - Never re-induce the schema on every sync.
+```
+
+Each unused entry is classified. `locked` entries (from `--base-schema`) are never pruned. `structural` entries (zero own instances but an instantiated descendant, a surviving child, or the domain/range of a surviving property) are kept; there is no re-parenting. Only `prunable` entries are removed. Pruning never touches nodes or edges: only zero-instance entries are eligible.
+
+**Reviewing and applying a plan.** `--preview` writes `intermediate/schema_prune_plan.json` and changes nothing else. Delete entries from its `remove` list to veto them (a type awaiting tomorrow's documents), then apply exactly that plan:
+
+```bash
+mykg prune-schema --session s1 --plan mykg_sessions/s1/intermediate/schema_prune_plan.json
+```
+
+At apply time the command recomputes a fresh drift report and validates the plan against it; it aborts with nothing changed if the plan is stale (documents synced, `schema.json` edited, or the lock file `base_schema_parsed.json` changed since the preview; the plan fingerprint covers the schema, per-type node/edge counts and the locked names), or lists a locked or structural entry, one that gained instances, or one not in the schema. Only the `remove` list of an edited plan matters: its `keep` and `totals` are ignored and recomputed. If nothing is prunable (or the edited plan's `remove` list is empty) the command prints `Nothing to prune.` and writes no backup and no history entry. `--preview` and `--plan` are mutually exclusive. Malformed `nodes.jsonl`/`edges.jsonl`, lock or schema content produces a clean error, not a traceback.
+
+On apply, `schema.json` is backed up to `intermediate/schema.pre_prune.json`, `schema.ttl` is rewritten atomically, `flattened_schema.json` is regenerated by the prune itself (only if that file already exists), a `schema_prune` record is added to `intermediate/schema_history/`, and `validate_graph` is re-run (no LLM). The closing message lists the outputs it regenerated per your config toggles (`nodes.jsonl`, `edges.jsonl`, `knowledge_graph.ttl`, the validation report, and NetworkX / Obsidian / Neo4j CSV / `walkthrough.md` when enabled in the config); an export that was enabled only by a CLI flag (such as `--neo4j-csv`) on the earlier run is not refreshed. Session names in suggested commands are shell-quoted.
+
+**Undoing a prune.** `flattened_schema.json` is not regenerated automatically on undo:
+
+1. Copy `intermediate/schema.pre_prune.json` over `intermediate/schema.json`.
+2. `mykg approve-schema --session s1` (regenerates `schema.ttl`).
+3. Delete `intermediate/flattened_schema.json`.
+4. `mykg extract-graph <dir> --session s1 --from-step validate_graph`.
+5. Re-run `mykg detect-schema-drift --session s1`.
+
+Do not use `--from-step schema_flatten` for this: it deletes the Pass 2 outputs. Undo restores the schema exactly as it was before the most recent prune, so it is only appropriate before later runs have grown or changed the schema (the backup is overwritten by the next prune).
+
+**Known limitations.** The writes during apply are not one transaction; they are ordered so that re-running the prune is idempotent after a crash, and `mykg approve-schema` repairs a stale `schema.ttl`. There is no cross-process lock: both commands refuse to run while a step in `pipeline_state.json` is `running`. Only one backup is kept (`schema.pre_prune.json` is overwritten by the next prune). `validate_graph` regenerates `nodes.jsonl` and `edges.jsonl` from `nodes.json` and `edge_metadata.json`.
+
+**Continuing the session after a prune**
+
+| Next command | What happens |
+|---|---|
+| `--append` | Schema is frozen at the pruned vocabulary. Documents about a removed type are silently dropped or mis-typed |
+| `--append-with-grow-schema` | The pruned schema is the locked base; locked Pass 1 can re-add removed types and back-fills old chunks. Use this if documents about pruned types may return |
+| `--append --sync` | Reconciles instances only; schema untouched. Run `detect-schema-drift` again afterwards |
+| `--from-step pass2` | Re-extracts against the pruned schema |
+| `--from-step pass1` / fresh run | Re-induces the schema; the prune is superseded |
+
+Note: locks come only from a `--base-schema` given on a fresh run (recorded in `intermediate/base_schema_parsed.json`). `--append-with-grow-schema` does not write that file, so a session without it has no locks: the commands print `no locked schema recorded; treating all entries as unlocked`.
+
+Typical order: sync, then detect, then prune. The walkthrough shows a **Schema Health** section once `schema_drift.json` exists (marked stale if the schema or graph changed since), and the MCP server's read-only `mykg_schema_drift` tool computes the report live from the graph as loaded in memory (see below). Details: [docs/architecture.md](docs/architecture.md#schema-drift-and-pruning).
+
+**MCP tool `mykg_schema_drift`.** Read-only: it never writes `schema_drift.json` and never prunes, and it reflects the graph as loaded in memory (call `mykg_reload` after a run that changed the session). Output, for the example session above:
+
+```
+Schema drift report for session s1 (3 nodes, 3 edges, as loaded in memory; call mykg_reload first if the session changed on disk)
+No base schema in this session (intermediate/base_schema_parsed.json absent): nothing is locked.
+
+Declared concepts: 5
+Unused concepts: 2
+  - Project [prunable]: 0 instances, 0 in subtree
+  - Service [prunable]: 0 instances, 0 in subtree
+
+Declared properties: 11
+Unused properties: 8
+  - owns_project [prunable] (Organization -> Project): 0 edges; domain/range removed
+  ...
+
+Reverse drift (used in the graph but not declared in the schema):
+  none
+
+This tool never prunes. Run `mykg prune-schema --session s1 --preview` (CLI) to see what pruning would remove.
+```
+
+The lock line has three variants: no base schema (above); `Locks read from base_schema_parsed.json: N locked concept(s), M locked property(ies).`; or a warning that the lock file could not be read, so locks are not applied and you should not prune until it is fixed. An "Always-null attributes (info only, never pruned)" section appears only when some declared attribute is null on every instance. Malformed in-memory data yields `Cannot compute schema drift: <error>`.
+
 ## MCP (Model Context Protocol) Server
 
 Serve any completed session as an MCP server for LLM-powered Q&A:
@@ -969,7 +1176,7 @@ If you also have the [`/mykg` skill](#agent-mode-claude-code-skill) installed, t
 }
 ```
 
-The MCP server exposes 14 tools: `mykg_search_nodes`, `mykg_get_node`, `mykg_get_neighbors`, `mykg_find_path`, `mykg_get_schema`, `mykg_list_node_types`, `mykg_query_subgraph`, `mykg_get_stats`, `mykg_query_graph` (BFS/DFS traversal), `mykg_hub_nodes`, `mykg_orphan_nodes`, `mykg_read_note` (Obsidian vault LLM wiki notes), `mykg_list_sessions`, and `mykg_reload` (refresh the in-memory graph after pipeline runs).
+The MCP server exposes 16 tools (including `mykg_get_source` and the read-only `mykg_schema_drift`): `mykg_search_nodes`, `mykg_get_node`, `mykg_get_neighbors`, `mykg_find_path`, `mykg_get_schema`, `mykg_list_node_types`, `mykg_query_subgraph`, `mykg_get_stats`, `mykg_query_graph` (BFS/DFS traversal), `mykg_hub_nodes`, `mykg_orphan_nodes`, `mykg_read_note` (Obsidian vault LLM wiki notes), `mykg_list_sessions`, and `mykg_reload` (refresh the in-memory graph after pipeline runs).
 
 **Configuration** — default transport, host, and port are set per profile in `mykg_config.yaml`:
 
@@ -1122,6 +1329,7 @@ Examples:
 | `/mykg extract ./docs with human review` | `mykg extract-graph ./docs --review` |
 | `/mykg extract ./docs with frozen schema from ontology.ttl` | `mykg extract-graph ./docs --base-schema ontology.ttl --freeze-schema` |
 | `/mykg append the new notes in ./docs` | `mykg extract-graph ./docs --append --session <latest>` |
+| `/mykg sync the graph with ./docs` | `mykg extract-graph ./docs --update --session <latest>` |
 | `/mykg expand the schema with ./docs` | `mykg extract-graph ./docs --append-with-grow-schema --session <latest>` |
 | `/mykg resume the last session` | `mykg extract-graph --session <latest>` |
 | `/mykg approve the schema` | `mykg approve-schema --session <latest>` |
@@ -1208,6 +1416,57 @@ uv run pytest tests/test_assembler.py -v
 uv run pytest -m "not live"
 open htmlcov/index.html
 ```
+
+### Healthiness check
+
+A dry-run smoke test that answers one question: **is everything alive and right?** It
+probes every configured LLM endpoint, then exercises the major capabilities —
+`fetch-web`, `parse-docs` (MinerU), `extract-graph`, `query`, `walkthrough` — end to end
+through the real CLI, and prints a summary table.
+
+```bash
+# Just the endpoints — seconds
+uv run pytest tests/test_healthiness.py -k endpoints -v --no-cov
+
+# Everything except MinerU — the usual quick check
+uv run pytest tests/test_healthiness.py -m "live and not mineru" -v --no-cov
+
+# Full check including PDF/XLSX conversion via MinerU
+uv run pytest tests/test_healthiness.py -m live -v --no-cov
+
+# Point the capability stages at a specific provider
+MYKG_E2E_PROFILE=gemini uv run pytest tests/test_healthiness.py -m live -v --no-cov
+```
+
+Each endpoint is checked twice: that it is reachable, and that it can return the JSON
+contract Pass 2 depends on — a provider can answer a ping and still fail every real
+extraction. Providers with no key configured are skipped, never failed, and failures are
+classified into an actionable cause (`quota or balance exhausted`, `api key rejected`,
+`model not available`, …) rather than a bare traceback.
+
+```
+  ENDPOINTS         reach   contract
+  openrouter-free   ok      ok        2 node(s), 1 edge(s)
+  anthropic-claude  ok      ok        2 node(s), 1 edge(s)
+  gemini            FAIL    —         quota or balance exhausted → top up, or switch profile
+  ollama-local      ok      ok        2 node(s), 1 edge(s)
+```
+
+Artifacts land in a pytest temp directory — the crawled HTML, the MinerU-converted
+Markdown, and a full session under `mykg_sessions/` — so a health check never touches
+your real sessions. The gitignored `_healthiness_run` symlink in the repo root points at
+the most recent run.
+
+Two things to expect. A **failing** endpoint is the slow one: the cause is only known
+after the adapter exhausts its 429 backoff ladder, which is what lets the report tell
+"rate limited, recovered" apart from "quota exhausted" — lower `llm.retry_429_max` for a
+faster verdict. And on free tiers (Gemini allows 5 requests/minute/model, OpenRouter's
+free models are similarly capped) the extraction stages log 429 backoff warnings; the
+adapters retry and recover, which is documented behaviour, not a failure.
+
+The whole file carries the `live` marker, so it is excluded from CI and from
+`pytest -m "not live"`. Design notes and measured results are in
+[docs/healthiness-check.md](docs/healthiness-check.md).
 
 ### Linting and Formatting
 

@@ -5,6 +5,7 @@ The terminal query is a replication of the MCP tool (mcp_server.py is
 read-only). These tests lock in that the two produce byte-for-byte identical
 output for the same session data.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -15,7 +16,7 @@ from types import SimpleNamespace
 import pytest
 from click.testing import CliRunner
 
-from mykg.query import QueryGraph, build_query_graph, query_graph
+from mykg.query import QueryGraph, _bm25_seed_nodes, build_query_graph, query_graph
 
 
 SCHEMA = {
@@ -24,8 +25,7 @@ SCHEMA = {
         {"type": "Organization", "attributes": ["name", "industry"], "parent": None},
     ],
     "properties": [
-        {"name": "works_at", "domain": "Person", "range": "Organization",
-         "attributes": ["role"]},
+        {"name": "works_at", "domain": "Person", "range": "Organization", "attributes": ["role"]},
     ],
 }
 
@@ -72,12 +72,8 @@ def session_dir(tmp_path: Path) -> Path:
     output.mkdir()
     intermediate = tmp_path / "intermediate"
     intermediate.mkdir()
-    (output / "nodes.jsonl").write_text(
-        "\n".join(json.dumps(n) for n in NODES), encoding="utf-8"
-    )
-    (output / "edges.jsonl").write_text(
-        "\n".join(json.dumps(e) for e in EDGES), encoding="utf-8"
-    )
+    (output / "nodes.jsonl").write_text("\n".join(json.dumps(n) for n in NODES), encoding="utf-8")
+    (output / "edges.jsonl").write_text("\n".join(json.dumps(e) for e in EDGES), encoding="utf-8")
     (intermediate / "schema.json").write_text(json.dumps(SCHEMA), encoding="utf-8")
     return tmp_path
 
@@ -117,13 +113,75 @@ class TestQueryGraph:
     def test_no_match(self, qg: QueryGraph):
         out = query_graph(qg, "zzz-nomatch")
         assert out == (
-            "No nodes found matching 'zzz-nomatch'. "
-            "Try mykg_search_nodes for more flexible search."
+            "No nodes found matching 'zzz-nomatch'. Try mykg_search_nodes for more flexible search."
         )
 
     def test_dfs_mode(self, qg: QueryGraph):
         out = query_graph(qg, "Alice", mode="dfs", depth=1)
         assert "Mode: dfs | Depth: 1" in out
+
+
+SEED_LIMIT_NODES = [
+    {
+        "id": f"person-match-{i}",
+        "type": "Person",
+        "confidence": 0.9,
+        "attributes": {"name": {"value": f"Widget Person {i}", "confidence": 1.0}},
+        "source_files": ["team.md"],
+    }
+    for i in range(5)
+]
+
+
+@pytest.fixture
+def seed_limit_session_dir(tmp_path: Path) -> Path:
+    output = tmp_path / "output"
+    output.mkdir()
+    intermediate = tmp_path / "intermediate"
+    intermediate.mkdir()
+    (output / "nodes.jsonl").write_text(
+        "\n".join(json.dumps(n) for n in SEED_LIMIT_NODES), encoding="utf-8"
+    )
+    (output / "edges.jsonl").write_text("", encoding="utf-8")
+    (intermediate / "schema.json").write_text(json.dumps(SCHEMA), encoding="utf-8")
+    return tmp_path
+
+
+@pytest.fixture
+def seed_limit_qg(seed_limit_session_dir: Path) -> QueryGraph:
+    return build_query_graph(seed_limit_session_dir)
+
+
+class TestSeedLimit:
+    def test_default_seed_limit_is_three(self, seed_limit_qg: QueryGraph):
+        out = query_graph(seed_limit_qg, "Widget Person")
+        seeds_line = next(line for line in out.splitlines() if line.startswith("Seeds:"))
+        seed_list = seeds_line.split("Seeds:")[1].split("|")[0].strip()
+        assert len(seed_list.split(", ")) == 3
+
+    def test_custom_seed_limit_changes_seed_count(self, seed_limit_qg: QueryGraph):
+        out = query_graph(seed_limit_qg, "Widget Person", seed_limit=5)
+        seeds_line = next(line for line in out.splitlines() if line.startswith("Seeds:"))
+        seed_list = seeds_line.split("Seeds:")[1].split("|")[0].strip()
+        assert len(seed_list.split(", ")) == 5
+
+    def test_seed_limit_one(self, seed_limit_qg: QueryGraph):
+        out = query_graph(seed_limit_qg, "Widget Person", seed_limit=1)
+        seeds_line = next(line for line in out.splitlines() if line.startswith("Seeds:"))
+        seed_list = seeds_line.split("Seeds:")[1].split("|")[0].strip()
+        assert len(seed_list.split(", ")) == 1
+
+    def test_bm25_seed_nodes_empty_corpus(self, tmp_path: Path):
+        output = tmp_path / "output"
+        output.mkdir()
+        intermediate = tmp_path / "intermediate"
+        intermediate.mkdir()
+        (output / "nodes.jsonl").write_text("", encoding="utf-8")
+        (output / "edges.jsonl").write_text("", encoding="utf-8")
+        (intermediate / "schema.json").write_text(json.dumps(SCHEMA), encoding="utf-8")
+        empty_qg = build_query_graph(tmp_path)
+        assert empty_qg.bm25_index is None
+        assert _bm25_seed_nodes(empty_qg, "anything", limit=3) == []
 
 
 def _invoke_mcp_tool(session_dir: Path, question: str, **kwargs) -> str:
@@ -168,6 +226,7 @@ class TestQueryCLI:
         (sessions_root / "synth").mkdir(parents=True)
         # move the synthetic session under sessions_root/synth
         import shutil
+
         shutil.copytree(session_dir / "output", sessions_root / "synth" / "output")
         shutil.copytree(session_dir / "intermediate", sessions_root / "synth" / "intermediate")
 

@@ -1,6 +1,6 @@
 ---
 name: mykg
-description: Run mykg knowledge-graph commands inside Claude Code from one slash command `/mykg`. The user describes intent in natural language (extract, append, resume, approve, walkthrough, parse-docs, fetch-web, query); the skill parses intent, builds the right `mykg` CLI command from the live `--help` output, confirms, runs it, and drives the inbox/outbox watch loop for LLM-bearing commands (extract-graph). For read-only queries, prefers MCP tools when the mykg MCP server is online, falling back to reading session files directly, with the `mykg query` CLI as a last-resort fallback. Ensures `.mcp.json` is configured (with user approval). Excludes `mykg init` (interactive shell command) and `mykg merge-graphs` (follow-up planning).
+description: Run mykg knowledge-graph commands inside Claude Code from one slash command `/mykg`. The user describes intent in natural language (extract, append, sync, resume, approve, walkthrough, parse-docs, fetch-web, query); the skill parses intent, builds the right `mykg` CLI command from the live `--help` output, confirms, runs it, and drives the inbox/outbox watch loop for LLM-bearing commands (extract-graph). For read-only queries, prefers MCP tools when the mykg MCP server is online, falling back to reading session files directly, with the `mykg query` CLI as a last-resort fallback. Ensures `.mcp.json` is configured (with user approval). Excludes `mykg init` (interactive shell command) and `mykg merge-graphs` (follow-up planning).
 ---
 
 # mykg — single slash command, intent-driven CLI dispatcher
@@ -25,10 +25,10 @@ This rule applies to *every* `/mykg query …` invocation and to every domain qu
 
 Only reuse an existing session when the user *explicitly* signals it. Explicit signals are any of:
 
-- The verbs **resume**, **continue**, **redo**, **append**, **approve**, **walkthrough**.
+- The verbs **resume**, **continue**, **redo**, **append**, **sync**, **reconcile**, **approve**, **walkthrough**, **prune**, **drift**.
 - A direct reference: **"the last session"**, **"the existing session"**, **"the same session"**, or a literal session name (typed as `--session <name>` or "session <name>").
-- A flag whose semantics require a session: **`--append`**, **`--from-step <step>`**.
-- A subcommand that inherently targets a completed session: **`approve-schema`**, **`walkthrough`**.
+- A flag whose semantics require a session: **`--append`**, **`--sync`**, **`--update`**, **`--from-step <step>`**.
+- A subcommand that inherently targets a completed session: **`approve-schema`**, **`walkthrough`**, **`detect-schema-drift`**, **`prune-schema`**.
 
 For anything else — including bare `/mykg <dir>`, `/mykg extract <dir>`, `/mykg extract more from <dir>`, "extract this folder" — pass **NO** `--session` flag. Words like "more", "again", "now", "next" are NOT explicit signals; they trigger a fresh session like every other plain extract command.
 
@@ -49,13 +49,20 @@ Trigger this skill whenever the user types `/mykg <anything>`. Map the intent to
 | `/mykg extract ./docs` | `mykg extract-graph ./docs` (**fresh session — no `--session`**) |
 | `/mykg extract more from ./more_docs` | `mykg extract-graph ./more_docs` (**fresh session** — "more" is NOT an explicit reuse signal; this is just another extract) |
 | `/mykg extract ./docs with human review` | `mykg extract-graph ./docs --review` (**fresh session — no `--session`**) |
-| `/mykg append the new notes in ./docs` | `mykg extract-graph ./docs --append --session <auto-detect-most-recent>` (explicit reuse via `append`) |
+| `/mykg append the new notes in ./docs` | `mykg extract-graph ./docs --append --session <auto-detect-most-recent>` (explicit reuse via `append`; NEW files only — see `--sync` below) |
+| `/mykg sync the graph with ./docs` | `mykg extract-graph ./docs --update --session <auto-detect-most-recent>` ("sync"/"reconcile"/"update" → `--update`, the shorthand for `--append --sync`) |
+| `/mykg pick up my edits in ./docs` | `mykg extract-graph ./docs --update --session <auto-detect-most-recent>` (**`--update`/`--sync`, not plain `--append`** — since D58 a modified file is only re-extracted under `--sync`) |
+| `/mykg remove deleted files from the graph` | `mykg extract-graph <folder> --update --session <auto-detect-most-recent>` |
 | `/mykg append and grow schema from ./docs` | `mykg extract-graph ./docs --append-with-grow-schema --session <auto-detect-most-recent>` (explicit reuse via `append`; locked Pass 1 runs over changed files to expand the schema) |
 | `/mykg expand the schema with new docs in ./docs` | `mykg extract-graph ./docs --append-with-grow-schema --session <auto-detect-most-recent>` ("expand schema" → `--append-with-grow-schema`) |
 | `/mykg resume the last session` | `mykg extract-graph --session <most-recent>` (explicit reuse via `resume the last session`) |
 | `/mykg approve the schema` | `mykg approve-schema --session <most-recent>` (session-only subcommand) |
 | `/mykg make a walkthrough` | `mykg walkthrough --session <most-recent>` (session-only subcommand) |
 | `/mykg make a walkthrough for 2026-06-02T17-30-00` | `mykg walkthrough --session 2026-06-02T17-30-00` (literal session name) |
+| `/mykg detect schema drift` / `/mykg which concepts are unused` | `mykg detect-schema-drift --session <most-recent>` (session-only subcommand; read-only, no LLM, records `schema_drift.json`) |
+| `/mykg preview schema pruning` / `/mykg what would pruning remove` | `mykg prune-schema --session <most-recent> --preview` (writes `schema_prune_plan.json`; schema untouched) |
+| `/mykg prune the schema` / `/mykg remove unused concepts` | `mykg prune-schema --session <most-recent>` (**mutates `schema.json`** — run the preview first and confirm; no LLM) |
+| `/mykg apply the prune plan` | `mykg prune-schema --session <most-recent> --plan <session>/intermediate/schema_prune_plan.json` (applies the possibly user-edited plan; `--plan` and `--preview` are mutually exclusive) |
 | `/mykg convert pdfs in ./inbox to ./md` | `mykg parse-docs --input ./inbox --output ./md` (no session concept) |
 | `/mykg fetch https://example.com` | `mykg fetch-web https://example.com` (no session concept) |
 | `/mykg fetch https://example.com into ./my_output_dir` (user names the output folder) | `mykg fetch-web https://example.com --output ./my_output_dir` (no session concept) |
@@ -90,6 +97,8 @@ The skill MUST NOT hand-code flag tables. The single source of truth is the live
 EXTRACT_HELP=$(uv run mykg extract-graph --help 2>&1)
 WALKTHROUGH_HELP=$(uv run mykg walkthrough --help 2>&1)
 APPROVE_HELP=$(uv run mykg approve-schema --help 2>&1)
+DRIFT_HELP=$(uv run mykg detect-schema-drift --help 2>&1)
+PRUNE_HELP=$(uv run mykg prune-schema --help 2>&1)
 PARSE_HELP=$(uv run mykg parse-docs --help 2>&1)
 FETCH_HELP=$(uv run mykg fetch-web --help 2>&1)
 ```
@@ -113,14 +122,20 @@ that are faster and more precise than manual grep/Read for graph queries.
 
 Shall I create .mcp.json with this content?
 
-  {
-    "mcpServers": {
-      "mykg": {
-        "command": "mykg",
-        "args": ["mcp-serve"]
-      }
+{
+  "mcpServers": {
+    "mykg": {
+      "command": "uv",
+      "args": [
+        "--directory",
+        "/path/to/your/project",
+        "run",
+        "mykg",
+        "mcp-serve"
+      ]
     }
   }
+}
 
 This tells Claude Code to start `mykg mcp-serve` as an MCP subprocess,
 making the `mcp__mykg__*` tools available in this session. The server
@@ -139,24 +154,61 @@ If `.mcp.json` already exists but does **not** contain a `mykg` server entry, as
 
 From the user's `/mykg <free text>` message extract:
 
-1. **Verb** — extract / append / approve / walkthrough / parse / fetch / download / resume / init / merge / **query** → maps to a CLI subcommand, a refusal, or the read-only file-read path (`query`). Fetch / download (URL or GitHub repo) maps to `fetch-web` — no session, same category as `parse-docs`.
+1. **Verb** — extract / append / approve / walkthrough / detect-drift / prune / parse / fetch / download / resume / init / merge / **query** → maps to a CLI subcommand, a refusal, or the read-only file-read path (`query`). Fetch / download (URL or GitHub repo) maps to `fetch-web` — no session, same category as `parse-docs`.
 2. **Input dir** — the path the user named, or `.` if they said "this folder", or absent for session-only commands (including `query`).
 3. **Session** — **default: do not pass `--session` at all** so mykg auto-creates a fresh timestamped session. Only override the default when the current user message contains an explicit reuse signal (see "Default behaviour" above). Resolution order:
    1. **Literal session name.** User typed `--session <name>` or "session <name>" → use that exact name.
-   2. **Explicit reuse verb / phrase.** User said one of: **resume**, **continue**, **redo**, **append**, **approve**, **walkthrough**, **query**, **"the last session"**, **"the existing session"**, **"the same session"** → auto-detect the most-recent session: list `$SESSIONS_DIR` (read top-level `sessions_root` from `mykg_config.yaml`, default `kg_sessions`), sort by mtime, pick newest.
+   2. **Explicit reuse verb / phrase.** User said one of: **resume**, **continue**, **redo**, **append**, **approve**, **walkthrough**, **prune**, **drift**, **query**, **"the last session"**, **"the existing session"**, **"the same session"** → auto-detect the most-recent session: list `$SESSIONS_DIR` (read top-level `sessions_root` from `mykg_config.yaml`, default `kg_sessions`), sort by mtime, pick newest.
    3. **Reuse-implying flag.** User specified `--append` or `--from-step <step>` → auto-detect-most-recent (these flags only make sense against an existing session).
-   4. **Session-only verb.** Verb is `approve-schema`, `walkthrough`, or `query` → auto-detect-most-recent. (`query` is read-only and always operates against an existing session.)
+   4. **Session-only verb.** Verb is `approve-schema`, `walkthrough`, `detect-schema-drift`, `prune-schema`, or `query` → auto-detect-most-recent. (`query` is read-only and always operates against an existing session.)
    5. **Otherwise.** Do NOT pass `--session`. mykg creates a fresh session. This is the path for bare `/mykg <dir>`, `/mykg extract <dir>`, `/mykg extract more from <dir>`, "extract this folder", etc.
    6. **Reuse required but missing.** If rules 2/3/4 fire but no session exists under `$SESSIONS_DIR`, fail clearly: `"No existing sessions under <SESSIONS_DIR>. Run /mykg extract <dir> first to create one."`
 
 **Never auto-detect-most-recent purely because a previous skill turn produced a session.** The previous-turn memory only matters when the *current* user message also contains one of the explicit signals in rules 1-4. A bare `/mykg ./more_docs` after a prior session must still create a fresh session.
-4. **Flags** — anything the user named that maps to a flag the cached `--help` confirms (`--review`, `--append`, `--from-step <step>`, `--workers <N>`, `--obsidian-vault`, `--base-schema`, `--freeze-schema`, `--thesaurus`, `--verbose`, `--confidence-agg`, `--append-with-grow-schema`, etc.). Forward verbatim.
+4. **Flags** — anything the user named that maps to a flag the cached `--help` confirms (`--review`, `--append`, `--sync`, `--update`, `--from-step <step>`, `--workers <N>`, `--obsidian-vault`, `--base-schema`, `--freeze-schema`, `--thesaurus`, `--verbose`, `--confidence-agg`, `--append-with-grow-schema`, etc.). Forward verbatim.
 
 `extract-graph` without `--append` or `--from-step` does not need a pre-existing session — it auto-creates one.
 
+### `--sync` — reconciling modifications and deletions (D58)
+
+**`--append` adds; `--sync` reconciles.** Four supported combinations:
+
+| Command | New files | Modified files | Deleted files | Schema |
+|---|---|---|---|---|
+| `--append` | extracted | **warn only** | **warn only** | frozen |
+| `--append-with-grow-schema` | extracted | **warn only** | **warn only** | may grow |
+| `--append --sync` (= `--update`) | extracted | **re-extracted** | **removed** | frozen |
+| `--append-with-grow-schema --sync` | extracted | **re-extracted** | **removed** | may grow |
+
+**`--update` is shorthand for `--append --sync`** — prefer it when the user's intent is "make the graph match the folder". `--sync` on its own requires `--append` (a `ClickException` otherwise). Detection always
+runs, so a plain `--append` that finds modified or deleted files logs a warning
+naming them and pointing at `--sync` — the graph is left untouched.
+
+**⚠️ Behaviour change:** before D58, plain `--append` re-extracted modified
+files. It no longer does. If a user says their edits "aren't showing up", the
+answer is almost always `--sync`.
+
+**Intent triggers** — use `--update` (or `--append --sync`) when the user says: "update", "sync", "reconcile",
+"remove deleted", "pick up my edits", "my changes aren't showing", "make the
+graph match the folder", "clean up files I deleted".
+
+**Nothing to reconcile is free.** With no modifications and no deletions,
+`--append --sync` degrades to exactly plain `--append` — no prune, no shard
+eviction, no extra LLM calls. It is safe to leave in a script permanently.
+
+**Deletion accuracy depends on `pass2.prep_mode`.** Exact under `per_file` or
+`batch_chunks` + `batch_per_file: true`. On the shipped default a co-batched
+sibling may retain over-attributed nodes (the pre-existing D53 limitation) —
+mention this if the user reports a node that "won't go away".
+
+**Multiple source folders.** Each folder appended to a session is registered
+with its own mirror subtree, so two crawls that both produce `index.md` no
+longer overwrite each other. `--sync` is scoped to the folder named on the
+command line: reconciling one folder can never delete another's files.
+
 ### `--append-with-grow-schema` — expanding the schema incrementally (D52)
 
-**Use case:** you have an existing session with an induced schema (e.g. Project, Person, Organization) and you add new documents that introduce entity types or relationships the current schema doesn't cover (e.g. a tech-stack document that describes technologies). Plain `--append` freezes the schema — Pass 1 is skipped, so new concept types and properties are never induced, and the new documents are extracted against the old vocabulary. `--append-with-grow-schema` solves this: it implies `--append` and runs a **locked Pass 1** over the changed files only, allowing the LLM to propose new concepts and properties while preserving everything already in the schema.
+**Use case:** you have an existing session with an induced schema (e.g. Project, Person, Organization) and you add new documents that introduce entity types or relationships the current schema doesn't cover (e.g. a tech-stack document that describes technologies). Plain `--append` freezes the schema — Pass 1 is skipped, so new concept types and properties are never induced, and the new documents are extracted against the old vocabulary. `--append-with-grow-schema` solves this: it implies `--append` and runs a **locked Pass 1** over the changed files only, allowing the LLM to propose new concepts and properties while preserving everything already in the schema. Since D58 "changed files" means NEW files unless `--sync` is also passed — add `--sync` when the new vocabulary lives in a document the user *edited* rather than added.
 
 **How it works:**
 1. The session's existing `schema.ttl` is auto-loaded as a locked base schema — existing classes and properties cannot be renamed, removed, or re-parented.
@@ -165,7 +217,7 @@ From the user's `/mykg <free text>` message extract:
 4. Pass 2 extracts the new files against the grown schema. If new properties were added, a **surgical back-fill** may re-extract old chunks that contain nodes of the new properties' domain/range types (configurable via `append.grow_schema_backfill_top_k_chunks_per_type`, default 10; set 0 to disable).
 5. All downstream steps (assemble, orphan pass, validate) re-run over the full corpus so the graph stays consistent.
 
-**When the schema delta is empty** (the new documents don't introduce new types), the run collapses to a plain `--append` — no wasted LLM cost.
+**When the schema delta is empty** (the new documents don't introduce new types), the run collapses to a plain `--append` — no wasted LLM cost. And when there is nothing to reconcile at all, the locked Pass 1 is skipped entirely (zero LLM calls) rather than dispatched over the whole corpus.
 
 **Intent triggers** — use `--append-with-grow-schema` when the user says any of: "grow schema", "expand schema", "grow the schema", "expand the vocabulary", "add new types", "learn new concepts from", "update the schema with". The flag implies `--append` (no need to pass both). `--append-with-grow-schema` is mutually exclusive with `--from-step` and `--base-schema`.
 
@@ -294,7 +346,7 @@ After every YAML edit, show `git diff --no-color mykg_config.yaml | head -8` to 
 
 ## Stage 2 — confirm intent before running
 
-For destructive or expensive actions (anything that calls LLMs, anything `--from-step`, anything `--append`), restate the parsed command in one line and ask the user to confirm:
+For destructive or expensive actions (anything that calls LLMs, anything `--from-step`, anything `--append`, and especially anything `--sync` — it REMOVES nodes), restate the parsed command in one line and ask the user to confirm. For `--sync`, run the command once without it first if you are unsure: the warning names exactly which files would be reconciled, so you can show the user that list before anything is removed:
 
 ```
 About to run: uv run mykg extract-graph ./docs --append --session 2026-06-02T17-30-00
@@ -302,7 +354,7 @@ About to run: uv run mykg extract-graph ./docs --append --session 2026-06-02T17-
 Reply "yes" to run, or correct me.
 ```
 
-For obviously safe actions (`walkthrough`, `parse-docs`, `fetch-web`), skip the confirmation and run.
+For obviously safe actions (`walkthrough`, `detect-schema-drift`, `prune-schema --preview`, `parse-docs`, `fetch-web`), skip the confirmation and run. `prune-schema` without `--preview` rewrites `schema.json`, so always confirm it, and offer the preview first if the user has not seen one.
 
 **`fetch-web` chained with `extract-graph`:** when the user's intent is "fetch
 and extract" (single seed or `--url-list`), run `fetch-web` directly (no
@@ -456,7 +508,7 @@ Track the wave count yourself. After 20 waves, tell the user:
 
 > Watch budget exhausted after 20 waves. Pipeline is still running (PID `$MYKG_PID`). Re-invoke `/mykg resume the last session` (or `/mykg --session <name> --continue`) to keep draining the inbox.
 
-### Stage 4b — synchronous path (`walkthrough`, `approve-schema`, `parse-docs`, `fetch-web`)
+### Stage 4b — synchronous path (`walkthrough`, `approve-schema`, `detect-schema-drift`, `prune-schema`, `parse-docs`, `fetch-web`)
 
 These subcommands do not write to the inbox. Run them in the foreground and report the resulting file path.
 
@@ -472,6 +524,14 @@ echo "Walkthrough: $SESSION_ROOT/walkthrough.md"
 ```bash
 uv run mykg approve-schema $ARGS
 echo "Approved: $SESSION_ROOT/intermediate/schema_approved.flag"
+```
+
+**`detect-schema-drift` / `prune-schema`:** no LLM, no inbox. Report the command's output verbatim; after a prune, remind the user that plain `--append` now drops documents about a removed type and `--append-with-grow-schema` can re-add them. An empty plan prints `Nothing to prune.` and changes nothing. If the user wants to undo a prune, give the sequence the command prints (do not invent your own, and never suggest `--from-step schema_flatten`, which deletes Pass 2 outputs): copy `intermediate/schema.pre_prune.json` over `schema.json`; `mykg approve-schema --session <S>`; delete `intermediate/flattened_schema.json` (it is NOT regenerated automatically); `mykg extract-graph <dir> --session <S> --from-step validate_graph`; re-run `mykg detect-schema-drift --session <S>`.
+
+```bash
+uv run mykg detect-schema-drift $ARGS            # writes $SESSION_ROOT/intermediate/schema_drift.json
+uv run mykg prune-schema $ARGS --preview         # writes $SESSION_ROOT/intermediate/schema_prune_plan.json
+uv run mykg prune-schema $ARGS                   # applies; backup in intermediate/schema.pre_prune.json
 ```
 
 **`parse-docs`:**

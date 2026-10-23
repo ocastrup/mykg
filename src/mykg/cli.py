@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -41,7 +42,56 @@ def _make_session_dirs(sessions_root: Path) -> tuple[str, Path, Path]:
     return name, root / "output", root / "intermediate"
 
 
-def _copy_input_files(input_dir: Path, session_root: Path, copy_config: bool = True) -> None:
+def _resolve_folder_for_copy(intermediate_dir: Path, input_dir: Path, sync: bool):
+    """Resolve (or register) ``input_dir`` in the session's folder registry (D58).
+
+    Returns ``(mirror_prefix, other_prefixes)`` for ``_copy_input_files``. An
+    unknown folder is auto-registered: a brand-new folder owns an empty subtree,
+    so a prune over it can never delete anything — which is what makes a typo'd
+    path inert rather than catastrophic, and removes any need for a cap.
+
+    Must run BEFORE the copy, since ``mirror_prefix`` is an argument to it, and
+    therefore before the pipeline's own mkdir calls — hence ``save`` creating
+    ``intermediate_dir`` itself.
+    """
+    from mykg import folder_registry as _fr
+
+    registry = _fr.load(intermediate_dir)
+    try:
+        entry = _fr.resolve(registry, input_dir)
+    except NotADirectoryError as exc:
+        raise click.ClickException(str(exc)) from exc
+    if entry is None:
+        entry = _fr.register(registry, input_dir)
+        if entry.mirror_prefix:
+            logging.getLogger(__name__).info(
+                "registered new source folder %s under mirror prefix %r",
+                input_dir,
+                entry.mirror_prefix,
+            )
+    if sync and not _cfg().PREPROCESS_SUBDIR and _cfg().PREPROCESS_ENABLED:
+        raise click.ClickException(
+            "--sync cannot be used with the legacy in-place preprocess layout "
+            "(preprocess.subdir is empty). Converted Markdown then sits beside "
+            "your sources and is indistinguishable from it, so a prune would "
+            "delete files the pipeline generated. Set preprocess.subdir in "
+            "mykg_config.yaml."
+        )
+    _fr.save(registry, intermediate_dir)
+    others = tuple(f.mirror_prefix for f in registry.folders if f.mirror_prefix != entry.mirror_prefix)
+    return entry.mirror_prefix, others
+
+
+def _copy_input_files(
+    input_dir: Path,
+    session_root: Path,
+    copy_config: bool = True,
+    *,
+    mirror_prefix: str = "",
+    prune: bool = False,
+    other_prefixes: tuple[str, ...] | None = None,
+    append_detect: bool = False,
+) -> None:
     """Copy all files from input_dir into session_root/input/, preserving subfolder structure.
 
     Only ``.md`` files and files whose suffix is in ``PREPROCESS_EXTENSIONS``
@@ -52,8 +102,24 @@ def _copy_input_files(input_dir: Path, session_root: Path, copy_config: bool = T
     that ``.venv``, ``.git``, and similar tool directories are never copied.
     ``mykg_config.yaml`` is skipped here because it is written separately below
     when ``copy_config=True``.
+
+    ``mirror_prefix`` (D58) is the subtree of ``session/input/`` this source
+    folder owns, so several folders can feed one session without their
+    same-named files overwriting each other. The first registered folder keeps
+    ``""``, which reproduces the pre-D58 flat layout exactly.
+
+    ``prune`` (D58, ``--append --sync``) additionally removes mirror files that
+    no longer exist in ``input_dir``. The walk is confined to ``mirror_prefix``
+    and skips the subtrees named in ``other_prefixes`` — that scoping is the
+    safety mechanism: reconciling one folder can never delete a file another
+    folder contributed, so no blast-radius cap is needed. (The exclusion list
+    matters because the first registered folder has an empty prefix, making
+    ``dest`` the mirror root.) All three parameters default to today's
+    behaviour.
     """
     dest = session_root / "input"
+    if mirror_prefix:
+        dest = dest / mirror_prefix
     dest.mkdir(parents=True, exist_ok=True)
     sessions_root = _sessions_root().resolve()
     config_path = _cfg().CONFIG_PATH.resolve()
@@ -77,8 +143,112 @@ def _copy_input_files(input_dir: Path, session_root: Path, copy_config: bool = T
         target = dest / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(f, target)
+
+    if prune:
+        _prune_mirror(input_dir, dest, allowed_exts, other_prefixes=other_prefixes or ())
+    elif append_detect:
+        # Detection still runs without --sync (D58). Ingest scans the MIRROR, and
+        # the mirror was not pruned, so it cannot see the deletion on its own —
+        # without this the documented warning would never fire for deleted files
+        # and the user would get no signal at all.
+        stale = _stale_mirror_files(input_dir, dest, allowed_exts, other_prefixes or ())
+        if stale:
+            logging.getLogger(__name__).warning(
+                "%d file(s) deleted from %s are still in the graph: %s. "
+                "Re-run with --sync (or --update) to remove them.",
+                len(stale),
+                input_dir,
+                ", ".join(sorted(str(s.relative_to(dest)) for s in stale)),
+            )
+
     if copy_config:
         shutil.copy2(_cfg().CONFIG_PATH, session_root / "mykg_config.yaml")
+
+
+def _stale_mirror_files(
+    input_dir: Path,
+    dest: Path,
+    allowed_exts: set[str],
+    other_prefixes: tuple[str, ...] = (),
+) -> list[Path]:
+    """Mirror files under ``dest`` with no counterpart in ``input_dir`` (D58).
+
+    Pure detection — nothing is unlinked. Split out from ``_prune_mirror`` so a
+    plain ``--append`` can still WARN about deletions: the mirror is not pruned
+    without ``--sync``, so ingest (which scans the mirror, not the user's folder)
+    would otherwise never see the file as missing and no warning would fire.
+
+    Only files this function could itself have created are considered — same
+    allowlist as the copy loop — so a prune can never touch anything unexpected.
+
+    ``input/<PREPROCESS_SUBDIR>/`` is excluded: machine-generated Markdown has no
+    counterpart in the user's source folder *by construction*, so a naive walk
+    would delete every converted file on every run and force a full (expensive)
+    MinerU re-conversion. ``step_preprocess`` owns that subtree and already
+    unlinks exactly the ``output_md`` of vanished sources.
+
+    Comparison is ``Path``-based on both sides: manifest-style string paths use
+    ``\\`` on Windows, so string compares would make every subdirectory file look
+    deleted.
+    """
+    subdir = _cfg().PREPROCESS_SUBDIR
+    preprocessed_root = (dest / subdir).resolve() if subdir else None
+    # The FIRST registered folder has an empty prefix, so `dest` is the mirror
+    # root and the walk would otherwise sweep every other folder's subtree —
+    # reconciling one folder would delete another's files. Exclude the subtrees
+    # owned by other registered prefixes explicitly.
+    foreign_roots = [(dest / p).resolve() for p in other_prefixes if p]
+
+    stale: list[Path] = []
+    for f in dest.rglob("*"):
+        if not f.is_file():
+            continue
+        if f.suffix.lower() not in allowed_exts:
+            continue
+        resolved_f = f.resolve()
+        if preprocessed_root is not None:
+            try:
+                resolved_f.relative_to(preprocessed_root)
+                continue  # machine-generated: step_preprocess owns it
+            except ValueError:
+                pass
+        owned_by_other = False
+        for root in foreign_roots:
+            try:
+                resolved_f.relative_to(root)
+                owned_by_other = True
+                break
+            except ValueError:
+                continue
+        if owned_by_other:
+            continue  # belongs to a different registered folder
+        if not (input_dir / f.relative_to(dest)).exists():
+            stale.append(f)
+    return stale
+
+
+def _prune_mirror(
+    input_dir: Path,
+    dest: Path,
+    allowed_exts: set[str],
+    other_prefixes: tuple[str, ...] = (),
+) -> None:
+    """Unlink the mirror files ``_stale_mirror_files`` identifies."""
+    to_delete = _stale_mirror_files(input_dir, dest, allowed_exts, other_prefixes)
+    if not to_delete:
+        return
+
+    # Compute the full list first and log it before unlinking, so run.log is a
+    # complete record even if a later unlink fails.
+    log = logging.getLogger(__name__)
+    log.info(
+        "sync: removing %d file(s) from the session mirror no longer present in %s: %s",
+        len(to_delete),
+        input_dir,
+        sorted(str(p.relative_to(dest)) for p in to_delete),
+    )
+    for path in to_delete:
+        path.unlink(missing_ok=True)
 
 
 _PROFILE_META = {
@@ -102,6 +272,13 @@ _PROFILE_META = {
         "key_hint": "sk-...",
         "key_url": "https://platform.openai.com/api-keys",
         "default_model": "gpt-4o",
+    },
+    "gemini": {
+        "label": "Google Gemini",
+        "key_var": "GEMINI_API_KEY",
+        "key_hint": "AIza...",
+        "key_url": "https://aistudio.google.com/apikey",
+        "default_model": "gemini-3.7-flash",
     },
     "ollama-local": {
         "label": "Ollama (local inference, no API key needed)",
@@ -635,7 +812,26 @@ def _print_next_steps(
 @click.option(
     "--append",
     is_flag=True,
-    help="Skip Pass 1, re-run only on new/modified files, then re-assemble and re-export",
+    help="Skip Pass 1 and extract only NEW files, then re-assemble and re-export. "
+    "Modified and deleted files are detected and warned about but not acted on — "
+    "add --sync to reconcile them.",
+)
+@click.option(
+    "--sync",
+    is_flag=True,
+    help="With --append: reconcile the graph against the folder — re-extract MODIFIED "
+    "files and remove DELETED ones. Scoped to the folder you name, so other folders "
+    "registered to the session are untouched. Exact deletion needs "
+    "pass2.prep_mode: per_file or pass2.batch_per_file: true; on the shipped default "
+    "a co-batched sibling may retain over-attributed nodes (D53).",
+)
+@click.option(
+    "--update",
+    "update",
+    is_flag=True,
+    help="Shorthand for --append --sync: bring in new files AND reconcile modified "
+    "and deleted ones, so the graph matches the folder. Combine with "
+    "--append-with-grow-schema to also let the schema grow.",
 )
 @click.option(
     "--append-with-grow-schema",
@@ -695,6 +891,8 @@ def extract_graph(
     workers,
     confidence_agg,
     append,
+    sync,
+    update,
     grow_schema,
     pass1_only,
     pass2_only,
@@ -708,8 +906,20 @@ def extract_graph(
     from mykg.orchestrator import PipelineContext, run
     from mykg.pipeline import STEPS
 
+    # --update is pure sugar for --append --sync. Expanded before the gate below
+    # so `--update` on its own does not trip the check it already satisfies.
+    if update:
+        append = True
+        sync = True
+
     if grow_schema:
         append = True
+
+    if sync and not append:
+        raise click.ClickException(
+            "--sync requires --append (or --append-with-grow-schema). Reconciliation "
+            "is meaningless on a fresh run, where the mirror is rebuilt anyway."
+        )
 
     # Run-only --profile / --model override. Must run before any _cfg() read,
     # load_adapter(), or the workers default below, so the whole config module
@@ -791,12 +1001,30 @@ def extract_graph(
             )
         output_dir = session_root / "output"
         intermediate_dir = session_root / "intermediate"
-        _copy_input_files(input_dir, session_root, copy_config=not append)
+        _prefix, _others = _resolve_folder_for_copy(intermediate_dir, input_dir, sync)
+        _copy_input_files(
+            input_dir,
+            session_root,
+            copy_config=not append,
+            mirror_prefix=_prefix,
+            prune=bool(append and sync),
+            other_prefixes=_others,
+            append_detect=bool(append and not sync),
+        )
         input_dir = session_root / "input"
     elif output_dir is None and intermediate_dir is None:
         session_name, output_dir, intermediate_dir = _make_session_dirs(sessions_root)
         session_root = sessions_root / session_name
-        _copy_input_files(input_dir, session_root, copy_config=not append)
+        _prefix, _others = _resolve_folder_for_copy(intermediate_dir, input_dir, sync)
+        _copy_input_files(
+            input_dir,
+            session_root,
+            copy_config=not append,
+            mirror_prefix=_prefix,
+            prune=bool(append and sync),
+            other_prefixes=_others,
+            append_detect=bool(append and not sync),
+        )
         input_dir = session_root / "input"
         click.echo(f"Session: {session_name}")
     else:
@@ -892,6 +1120,7 @@ def extract_graph(
         pass2_workers=workers,
         confidence_agg=confidence_agg,
         append=append,
+        sync=sync,
         grow_schema=grow_schema,
         freeze_schema=freeze_schema,
         orphan_incremental=orphan_incremental,
@@ -903,6 +1132,12 @@ def extract_graph(
     intermediate_dir.mkdir(parents=True, exist_ok=True)
 
     import json as _json
+
+    # raw_input_folder.json is written by _resolve_folder_for_copy (D58) — it is
+    # a folder registry now, not a write-once path, so it must be able to grow
+    # when a second source folder is appended. The fallback below only covers
+    # runs that bypass session handling entirely (explicit --output-dir /
+    # --intermediate-dir), where no registry was resolved.
     raw_input_path = intermediate_dir / "raw_input_folder.json"
     if not raw_input_path.exists():
         raw_input_path.write_text(
@@ -1949,6 +2184,321 @@ def _resolve_session_root(session: str | None) -> Path:
     return session_root
 
 
+def _drift_session(session: str | None) -> tuple[Path, Path, Path]:
+    """Resolve (session_root, intermediate_dir, output_dir) for the drift commands."""
+    session_root = _resolve_session_root(session)
+    intermediate_dir = session_root / "intermediate"
+    if not (intermediate_dir / "schema.json").exists():
+        raise click.ClickException(f"schema.json not found in {intermediate_dir}")
+    state_path = intermediate_dir / "pipeline_state.json"
+    if state_path.exists():
+        try:
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            state = {}
+        running = sorted(
+            n
+            for n, v in (state.get("steps") or {}).items()
+            if isinstance(v, dict) and v.get("status") == "running"
+        )
+        if running:
+            raise click.ClickException(
+                f"Step(s) {', '.join(running)} are marked running in {state_path}; "
+                "an extraction may be in progress. Wait for it to finish (or resume/fail it) "
+                "before touching the schema."
+            )
+        unfinished = sorted(
+            n
+            for n, v in (state.get("steps") or {}).items()
+            if isinstance(v, dict) and v.get("status") in ("failed", "waiting")
+        )
+        if unfinished:
+            click.echo(
+                f"warning: step(s) {', '.join(unfinished)} are failed/waiting; the output files "
+                "may be stale relative to an unfinished run."
+            )
+    return session_root, intermediate_dir, session_root / "output"
+
+
+def _run_drift_analysis(intermediate_dir: Path, output_dir: Path, quiet: bool = False):
+    """Detect drift, record schema_drift.json, return the DriftReport."""
+    from mykg.schema_drift import (
+        LockedSchema,
+        SchemaDriftError,
+        analyze_drift,
+        record_drift,
+        stream_jsonl,
+    )
+
+    try:
+        schema = json.loads((intermediate_dir / "schema.json").read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise click.ClickException(f"Cannot read schema.json: {exc}") from exc
+    parsed = None
+    parsed_path = intermediate_dir / "base_schema_parsed.json"
+    if parsed_path.exists():
+        try:
+            parsed = json.loads(parsed_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise click.ClickException(f"Cannot read {parsed_path}: {exc}") from exc
+    elif not quiet:
+        click.echo("no locked schema recorded; treating all entries as unlocked")
+    try:
+        report = analyze_drift(
+            schema,
+            stream_jsonl(output_dir / "nodes.jsonl"),
+            stream_jsonl(output_dir / "edges.jsonl"),
+            LockedSchema.from_parsed(parsed),
+        )
+    except (SchemaDriftError, OSError, UnicodeDecodeError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    record_drift(report, intermediate_dir)
+    return report
+
+
+def _echo_drift_report(report) -> None:
+    names = ", ".join(c.name for c in report.concepts) or "(none)"
+    click.echo(f"declared concepts: {names}")
+    unused_c = report.unused_concepts()
+    if unused_c:
+        items = ", ".join(f"{c.name} ({c.instance_count} instances)" for c in unused_c)
+        click.echo(f"unused concepts: {items}")
+    else:
+        click.echo("unused concepts: none")
+    unused_p = report.unused_properties()
+    click.echo(
+        f"declared properties: {len(report.properties)} "
+        f"({len(unused_p)} unreferenced by active edges)"
+    )
+    for c in unused_c:
+        click.echo(f"  concept  {c.name}: {c.classification} - {c.reason}")
+    for p in unused_p:
+        click.echo(f"  property {p.name}: {p.classification} - {p.reason}")
+    for c in report.concepts:
+        if c.always_null_attributes:
+            click.echo(
+                f"  info: {c.name} attribute(s) always null: {', '.join(c.always_null_attributes)}"
+            )
+    if report.undeclared_node_types:
+        click.echo(
+            "undeclared node types (in graph, not in schema): "
+            + ", ".join(f"{t} ({n})" for t, n in report.undeclared_node_types.items())
+        )
+    if report.undeclared_edge_types:
+        click.echo(
+            "undeclared edge types (in graph, not in schema): "
+            + ", ".join(f"{t} ({n})" for t, n in report.undeclared_edge_types.items())
+        )
+
+
+@cli.command("detect-schema-drift")
+@click.option(
+    "--session", default=None, help="Session name under the sessions dir; defaults to latest."
+)
+def detect_schema_drift(session):
+    """Report schema concepts/properties with no instances in the graph (advisory).
+
+    Read-only apart from intermediate/schema_drift.json. No LLM is used.
+    """
+    session_root, intermediate_dir, output_dir = _drift_session(session)
+    report = _run_drift_analysis(intermediate_dir, output_dir)
+    _echo_drift_report(report)
+    n_prunable = sum(
+        1 for r in (*report.concepts, *report.properties) if r.classification == "prunable"
+    )
+    click.echo(f"Report recorded in {intermediate_dir / 'schema_drift.json'}")
+    if n_prunable:
+        click.echo(
+            f"{n_prunable} entr{'y' if n_prunable == 1 else 'ies'} prunable; "
+            f"see: mykg prune-schema --session {shlex.quote(session_root.name)} --preview"
+        )
+
+
+def _echo_plan(plan, session_name: str, intermediate_dir: Path) -> None:
+    from mykg.schema_drift import PLAN_FILE
+
+    click.echo("Will be removed:")
+    if not plan.remove:
+        click.echo("  (nothing)")
+    for e in plan.remove:
+        click.echo(f"  {e.kind} {e.name}: {e.reason}")
+    if plan.keep:
+        click.echo("Kept although unused:")
+        for e in plan.keep:
+            click.echo(f"  {e.kind} {e.name}: {e.reason}")
+    b, a = plan.totals.before, plan.totals.after
+    click.echo(
+        f"Totals: {b.concepts} concepts / {b.properties} properties -> "
+        f"{a.concepts} / {a.properties}"
+    )
+    click.echo("Warnings:")
+    click.echo(
+        "  - A removed type is silently dropped from future extraction if the schema is "
+        "frozen (plain --append). Use --append-with-grow-schema when its documents return."
+    )
+    click.echo("  - Never re-induce the schema on every sync.")
+    click.echo("Files that would change on apply:")
+    for f in (
+        "intermediate/schema.json (backup: schema.pre_prune.json)",
+        "intermediate/schema.ttl",
+        "intermediate/schema_history/<seq>_schema_prune.json",
+        "intermediate/flattened_schema.json (only if it already exists)",
+        "output/knowledge_graph.ttl and knowledge_graph_validation.json, plus any export "
+        "enabled in the config (NetworkX, Obsidian vault, Neo4j CSV) and walkthrough.md, "
+        "regenerated by validate_graph (walkthrough.md only when report.enabled)",
+    ):
+        click.echo(f"  {f}")
+    click.echo(f"Plan written to {intermediate_dir / PLAN_FILE}")
+    click.echo(
+        f"Apply with: mykg prune-schema --session {shlex.quote(session_name)} --plan "
+        f"{shlex.quote(str(intermediate_dir / PLAN_FILE))}"
+    )
+
+
+def _refresh_after_prune(
+    session_root: Path, intermediate_dir: Path, output_dir: Path
+) -> list[str] | None:
+    """Re-run only validate_graph (no LLM) after a prune.
+
+    ``apply_prune`` already rewrote schema.ttl and flattened_schema.json. Returns
+    the list of outputs regenerated, or None when the assemble outputs
+    validate_graph needs are missing.
+    """
+    from mykg.orchestrator import PipelineContext
+    from mykg.steps.step_validate_graph import run_validate_graph
+
+    if not (
+        (intermediate_dir / "nodes.json").exists()
+        and (intermediate_dir / "edge_metadata.json").exists()
+    ):
+        return None
+    ctx = PipelineContext(
+        input_dir=session_root / "input",
+        output_dir=output_dir,
+        intermediate_dir=intermediate_dir,
+        adapter=None,
+    )
+    run_validate_graph(ctx)
+    cfg = _cfg()
+    done = [
+        "nodes.jsonl",
+        "edges.jsonl",
+        "knowledge_graph.ttl",
+        "knowledge_graph_validation.json",
+    ]
+    for enabled, label in (
+        (cfg.NETWORKX_ENABLED, "NetworkX exports"),
+        (cfg.OBSIDIAN_ENABLED, "Obsidian vault"),
+        (cfg.NEO4J_CSV_ENABLED, "Neo4j CSV bundle"),
+    ):
+        if enabled:
+            done.append(label)
+    if cfg.REPORT_ENABLED:
+        from mykg.steps.step_walkthrough import run_walkthrough
+
+        run_walkthrough(session_root, log_file=session_root / "run.log")
+        done.append("walkthrough.md")
+    return done
+
+
+@cli.command("prune-schema")
+@click.option(
+    "--session", default=None, help="Session name under the sessions dir; defaults to latest."
+)
+@click.option(
+    "--preview", is_flag=True, help="Show and write the removal plan; change nothing else."
+)
+@click.option(
+    "--plan",
+    "plan_file",
+    default=None,
+    type=click.Path(path_type=Path),
+    help="Apply exactly the removals in this (possibly edited) plan file.",
+)
+def prune_schema(session, preview, plan_file):
+    """Remove unused concepts/properties from the session schema (no LLM)."""
+    from mykg.schema_drift import (
+        BACKUP_FILE,
+        SchemaDriftError,
+        apply_prune,
+        load_plan,
+        plan_prune,
+        recompute_plan,
+        write_plan,
+    )
+
+    if preview and plan_file is not None:
+        raise click.UsageError("--preview and --plan are mutually exclusive")
+    session_root, intermediate_dir, output_dir = _drift_session(session)
+    report = _run_drift_analysis(intermediate_dir, output_dir)
+
+    if preview:
+        plan = plan_prune(report)
+        write_plan(plan, intermediate_dir)
+        _echo_plan(plan, session_root.name, intermediate_dir)
+        return
+
+    try:
+        if plan_file is not None:
+            plan = recompute_plan(load_plan(plan_file), report)
+        else:
+            plan = plan_prune(report)
+        if not plan.remove:
+            click.echo("Nothing to prune.")
+            return
+        pruned = apply_prune(plan, intermediate_dir, report)
+    except SchemaDriftError as exc:
+        raise click.ClickException(f"{exc}\nNothing was changed.") from exc
+
+    click.echo(
+        f"Pruned schema: {len(report.concepts)} concepts / {len(report.properties)} properties "
+        f"-> {len(pruned['concepts'])} / {len(pruned['properties'])}"
+    )
+    for e in plan.remove:
+        click.echo(f"  removed {e.kind} {e.name}: {e.reason}")
+    click.echo(f"Backup: {intermediate_dir / BACKUP_FILE}")
+    q_session = shlex.quote(session_root.name)
+    follow_up = f"mykg extract-graph <dir> --session {q_session} --from-step validate_graph"
+    # Re-record before the refresh so schema_drift.json describes the pruned schema; the
+    # walkthrough regenerated by the refresh compares its fingerprint against this record.
+    _run_drift_analysis(intermediate_dir, output_dir, quiet=True)
+    refresh_error: Exception | None = None
+    refreshed = None
+    try:
+        refreshed = _refresh_after_prune(session_root, intermediate_dir, output_dir)
+    except Exception as exc:  # the schema is already pruned; finish the bookkeeping first
+        refresh_error = exc
+    click.echo("Regenerated schema.ttl and flattened_schema.json (if present).")
+    if refresh_error is not None:
+        click.echo(f"Refreshing outputs failed: {refresh_error}. Re-run: {follow_up}", err=True)
+    elif refreshed is not None:
+        click.echo(
+            "Regenerated outputs (per config toggles; exports enabled only by a CLI flag on "
+            "the earlier run are not refreshed): " + ", ".join(refreshed) + "."
+        )
+    else:
+        click.echo(
+            "nodes.json/edge_metadata.json missing, so output/ was not refreshed; "
+            f"run: {follow_up}"
+        )
+    click.echo(
+        "Note: with a frozen schema (plain --append) documents about a removed type are "
+        "dropped; use --append-with-grow-schema when they return."
+    )
+    click.echo(
+        f"Undo: copy {shlex.quote(str(intermediate_dir / BACKUP_FILE))} over "
+        f"{shlex.quote(str(intermediate_dir / 'schema.json'))}; run "
+        f"mykg approve-schema --session {q_session} (regenerates schema.ttl); delete "
+        f"{shlex.quote(str(intermediate_dir / 'flattened_schema.json'))}; then run "
+        f"{follow_up}; finally re-run mykg detect-schema-drift --session {q_session}. "
+        "flattened_schema.json is NOT regenerated automatically."
+    )
+    if refresh_error is not None:
+        raise click.ClickException(
+            f"Schema pruned, but refreshing outputs failed: {refresh_error}. Re-run: {follow_up}"
+        ) from refresh_error
+
+
 @cli.command("mcp-serve")
 @click.option("--session", default=None, help="Session name under mykg_sessions/; defaults to latest.")
 @click.option(
@@ -2021,12 +2571,13 @@ def mcp_serve(session, transport, host, port, stop):
 @click.option("--mode", type=click.Choice(["bfs", "dfs"]), default="bfs", help="Traversal mode.")
 @click.option("--depth", default=2, type=int, help="Traversal depth limit.")
 @click.option("--token-budget", "token_budget", default=2000, type=int, help="Approx token budget for the returned context.")
-def query(question, session, mode, depth, token_budget):
+@click.option("--seed-limit", "seed_limit", default=3, type=int, help="Max number of seed nodes to start traversal from.")
+def query(question, session, mode, depth, token_budget, seed_limit):
     """Query the knowledge graph from the terminal (mirrors the MCP query tool)."""
     session_root = _resolve_session_root(session)
     from mykg.query import build_query_graph, query_graph
     qg = build_query_graph(session_root)
-    click.echo(query_graph(qg, question, mode=mode, depth=depth, token_budget=token_budget))
+    click.echo(query_graph(qg, question, mode=mode, depth=depth, token_budget=token_budget, seed_limit=seed_limit))
 
 
 # ---------------------------------------------------------------------------

@@ -171,6 +171,7 @@ PASS1_RANDOM_SEED: int = _get_opt("pass1", "random_seed", 0)
 PASS2_MAX_WORKERS: int = _get("pass2", "max_workers")
 PASS2_STATEFUL_CHUNKS: bool = _get("pass2", "stateful_chunks")
 PASS2_PREP_MODE: str = _get_opt("pass2", "prep_mode", "batch_chunks")
+PASS2_PER_FILE_TOKEN_TARGET: int = _get_opt("pass2", "per_file_token_target", 0)
 PASS2_CONCAT_BATCH_TOKEN_TARGET: int = _get_opt("pass2", "concat_batch_token_target", 100000)
 PASS2_BATCH_TOKEN_TARGET: int = _get_opt("pass2", "batch_token_target", 100000)
 PASS2_BATCH_PER_FILE: bool = _get_opt("pass2", "batch_per_file", False)
@@ -207,6 +208,11 @@ OBSIDIAN_ENABLED: bool = _get_opt("export", "obsidian_enabled", False)
 OBSIDIAN_VAULT_DIR: str = _get_opt("export", "obsidian_vault_dir", "obsidian_vault")
 NEO4J_CSV_ENABLED: bool = _get_opt("export", "neo4j_csv_enabled", False)
 NEO4J_CSV_DIR: str = _get_opt("export", "neo4j_csv_dir", "neo4j_csv")
+# Render ceiling for the interactive vis.js HTML export (D61). Read but not
+# surfaced in the shipped mykg_config.yaml files -- same precedent as
+# llm.temperature_unsupported_prefixes (D3) and pass2.domain_range_policy (D60).
+# -1 disables the ceiling entirely.
+EXPORT_HTML_MAX_NODES: int = _get_opt("export", "html_max_nodes", 5000)
 
 # ---------------------------------------------------------------------------
 # Output / intermediate paths (D16, D18)
@@ -367,7 +373,7 @@ if MERGE_GRAPHS_REEXTRACTION_STRATEGY not in _VALID_REEXTRACTION_STRATEGIES:
     )
 MERGE_GRAPHS_HUMAN_REVIEW: bool = bool(_get_opt("merge_graphs", "human_review", False))
 MERGE_SURGICAL_TOP_K_CHUNKS_PER_PROPERTY: int = _get_opt(
-    "merge_graphs", "surgical_top_k_chunks_per_property", 0
+    "merge_graphs", "surgical_top_k_chunks_per_property", 1
 )
 MERGE_ORPHAN_SCHEMA_MAX_RESTARTS: int = _get_opt("merge_graphs", "orphan_pass_max_restarts", 1)
 

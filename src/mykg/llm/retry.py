@@ -30,6 +30,13 @@ _CONTEXT_EXCEEDED_MARKERS = (
     "too many tokens",
     "prompt is too long",
     "context_length_exceeded",
+    # Gemini phrases input overflow as "The input token count (N) exceeds the
+    # maximum number of tokens allowed" — matched by neither "maximum context"
+    # nor "too many tokens". Anchored on "input token count" rather than the
+    # looser "exceeds the maximum number of tokens", which also matches Gemini's
+    # *output*-cap rejection and would mislabel a max_output_tokens problem as a
+    # context-window one (different fix, different knob).
+    "input token count",
 )
 
 
@@ -84,6 +91,7 @@ def llm_complete_with_retry(
     context_label: str = "",
     max_tokens: int | None = None,
     timeout: int | None = None,
+    temperature: float | None = None,
 ) -> str:
     """Call adapter.complete(), retrying up to LLM_RETRY_MAX_RETRIES times on empty response.
 
@@ -92,6 +100,7 @@ def llm_complete_with_retry(
 
     max_tokens: per-call override forwarded to the adapter; None means use adapter default.
     timeout: per-call override in seconds forwarded to the adapter; None means use adapter default.
+    temperature: per-call override forwarded to the adapter; None means use adapter default.
     """
     max_retries = _cfg.LLM_RETRY_MAX_RETRIES
     label = f" [{context_label}]" if context_label else ""
@@ -102,6 +111,7 @@ def llm_complete_with_retry(
             context_label=context_label,
             max_tokens=max_tokens,
             timeout=timeout,
+            temperature=temperature,
         )
         if raw.strip():
             return raw

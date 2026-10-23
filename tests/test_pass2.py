@@ -60,6 +60,7 @@ class MockAdapter(LLMAdapter):
         context_label: str = "",
         max_tokens: int | None = None,
         timeout: int | None = None,
+        temperature: float | None = None,
     ) -> str:
         return self._response
 
@@ -118,6 +119,89 @@ def test_run_pass2_returns_keyed_by_file():
     result, chunk_index, _failed = run_pass2(files, SCHEMA, FLAT_SCHEMA, adapter)
     assert "team.md" in result
     assert "team.md" in chunk_index
+
+
+class RecordingAdapter(LLMAdapter):
+    """Adapter that records every `user` prompt (chunk text) it is asked to extract."""
+
+    def __init__(self, response: str):
+        self._response = response
+        self.user_prompts: list[str] = []
+
+    def complete(
+        self,
+        system: str,
+        user: str,
+        context_label: str = "",
+        max_tokens: int | None = None,
+        timeout: int | None = None,
+        temperature: float | None = None,
+    ) -> str:
+        self.user_prompts.append(user)
+        return self._response
+
+    def endpoint_label(self) -> str:
+        return "recording"
+
+
+def test_run_pass2_truncates_oversized_file(tmp_path):
+    """A file over max_file_tokens is truncated to its prefix; the tail never reaches the LLM,
+    and the truncation is recorded in oversized_files.json."""
+    adapter = RecordingAdapter(json.dumps(VALID_EXTRACTION))
+    tail_marker = "UNIQUETAILMARKER"
+    # First part is comfortably over the 100-token cap; the tail marker sits past it.
+    big = ("prefix content here. " * 400) + tail_marker
+    small = "Alice works at Acme."
+    files = {"big.md": big, "small.md": small}
+
+    result, _chunk_index, _failed = run_pass2(
+        files,
+        SCHEMA,
+        FLAT_SCHEMA,
+        adapter,
+        max_workers=1,
+        intermediate_dir=tmp_path,
+        max_file_tokens=100,
+    )
+
+    # The tail past the cap must never have been sent to the LLM.
+    assert not any(tail_marker in p for p in adapter.user_prompts)
+    # The big file collapsed to a single (truncated) chunk / LLM call — a 1607-token file
+    # would otherwise span multiple windows. The repeated phrase appears far fewer times in
+    # the sent prompt than in the original ~400 repetitions, proving the body was truncated.
+    big_prompts = [p for p in adapter.user_prompts if "prefix content here" in p]
+    assert len(big_prompts) == 1
+    assert big_prompts[0].count("prefix content here") < big.count("prefix content here")
+    # Both files still produced results.
+    assert "big.md" in result and "small.md" in result
+
+    manifest = json.loads((tmp_path / "oversized_files.json").read_text(encoding="utf-8"))
+    assert [r["filename"] for r in manifest] == ["big.md"]
+    assert manifest[0]["cap"] == 100
+    assert manifest[0]["original_tokens"] > 100
+
+
+def test_run_pass2_no_cap_leaves_content_untouched(tmp_path):
+    """max_file_tokens=0 (the default, used by concat/surgical callers) must not truncate,
+    and must not write an oversized_files.json manifest."""
+    adapter = RecordingAdapter(json.dumps(VALID_EXTRACTION))
+    tail_marker = "UNIQUETAILMARKER"
+    big = ("prefix content here. " * 400) + tail_marker
+    files = {"big.md": big}
+
+    run_pass2(
+        files,
+        SCHEMA,
+        FLAT_SCHEMA,
+        adapter,
+        max_workers=1,
+        intermediate_dir=tmp_path,
+        max_file_tokens=0,
+    )
+
+    # The whole file (including the tail) reached the LLM — nothing dropped.
+    assert any(tail_marker in p for p in adapter.user_prompts)
+    assert not (tmp_path / "oversized_files.json").exists()
 
 
 def test_pass2_system_prompt_contains_key_rules():
@@ -217,7 +301,7 @@ def test_run_pass2_respects_max_workers():
     calls = []
 
     class TrackingAdapter(LLMAdapter):
-        def complete(self, system, user, context_label="", max_tokens=None, timeout=None):
+        def complete(self, system, user, context_label="", max_tokens=None, timeout=None, temperature=None):
             calls.append(1)
             return json.dumps(VALID_EXTRACTION)
 
@@ -233,7 +317,7 @@ def test_run_pass2_parallel_workers():
     """run_pass2 with max_workers=2 still produces results for all files."""
 
     class FastAdapter(LLMAdapter):
-        def complete(self, system, user, context_label="", max_tokens=None, timeout=None):
+        def complete(self, system, user, context_label="", max_tokens=None, timeout=None, temperature=None):
             return json.dumps(VALID_EXTRACTION)
 
         def endpoint_label(self) -> str:
@@ -275,7 +359,7 @@ def test_chunk_retry_on_validation_failure():
     calls = []
 
     class RetryAdapter(LLMAdapter):
-        def complete(self, system, user, context_label="", max_tokens=None, timeout=None):
+        def complete(self, system, user, context_label="", max_tokens=None, timeout=None, temperature=None):
             calls.append(user)
             if len(calls) == 1:
                 return bad
@@ -355,7 +439,7 @@ def test_skip_files_excludes_already_done_files():
     """Files in skip_files must not be submitted to the executor."""
 
     class TrackingAdapter(LLMAdapter):
-        def complete(self, system, user, context_label="", max_tokens=None, timeout=None):
+        def complete(self, system, user, context_label="", max_tokens=None, timeout=None, temperature=None):
             return json.dumps(VALID_EXTRACTION)
 
         def endpoint_label(self) -> str:
@@ -381,7 +465,7 @@ def test_on_file_done_called_once_per_file():
         done_calls.append(fname)
 
     class FastAdapter(LLMAdapter):
-        def complete(self, system, user, context_label="", max_tokens=None, timeout=None):
+        def complete(self, system, user, context_label="", max_tokens=None, timeout=None, temperature=None):
             return json.dumps(VALID_EXTRACTION)
 
         def endpoint_label(self) -> str:
@@ -401,7 +485,7 @@ def test_partial_restart_skips_done_files():
         done_calls.append(fname)
 
     class FastAdapter(LLMAdapter):
-        def complete(self, system, user, context_label="", max_tokens=None, timeout=None):
+        def complete(self, system, user, context_label="", max_tokens=None, timeout=None, temperature=None):
             return json.dumps(VALID_EXTRACTION)
 
         def endpoint_label(self) -> str:
@@ -425,7 +509,7 @@ def test_blank_response_writes_failed_chunks(tmp_path):
     """A chunk that returns blank twice writes an entry to failed_chunks.json."""
 
     class BlankAdapter(LLMAdapter):
-        def complete(self, system, user, context_label="", max_tokens=None, timeout=None):
+        def complete(self, system, user, context_label="", max_tokens=None, timeout=None, temperature=None):
             return ""  # always blank
 
         def endpoint_label(self) -> str:

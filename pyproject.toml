@@ -1,6 +1,6 @@
 [project]
 name = "mykg"
-version = "0.3.29"
+version = "0.4.9"
 description = "AI workflow that turns documents into a confidence-scored knowledge graph with an induced RDFS/OWL ontology"
 readme = "README.md"
 license = { text = "MIT" }
@@ -25,6 +25,7 @@ dependencies = [
     "tiktoken>=0.6",
     "anthropic>=0.28",
     "openai>=1.30",
+    "google-genai>=2.18",
     "click>=8.1",
     "pyyaml>=6.0",
     "python-dotenv>=1.0",
@@ -32,6 +33,7 @@ dependencies = [
     "uv>=0.4",
     "markdownify>=0.13",
     "mcp>=1.0",
+    "bm25s>=0.2",
 ]
 
 [project.scripts]
@@ -58,6 +60,7 @@ addopts = "--cov=mykg --cov-report=term-missing --cov-report=html"
 testpaths = ["tests"]
 markers = [
     "live: marks tests that make real network/API calls (deselect with '-m not live')",
+    "mineru: exercises the MinerU ephemeral venv (multi-GB download on first run)",
 ]
 
 [tool.coverage.run]

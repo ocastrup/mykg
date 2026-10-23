@@ -1,4 +1,5 @@
 """Tests for the mykg MCP server module."""
+
 from __future__ import annotations
 
 import asyncio
@@ -105,15 +106,9 @@ def session_dir(tmp_path: Path) -> Path:
     intermediate = tmp_path / "intermediate"
     intermediate.mkdir()
 
-    (output / "nodes.jsonl").write_text(
-        "\n".join(json.dumps(n) for n in NODES), encoding="utf-8"
-    )
-    (output / "edges.jsonl").write_text(
-        "\n".join(json.dumps(e) for e in EDGES), encoding="utf-8"
-    )
-    (intermediate / "schema.json").write_text(
-        json.dumps(SCHEMA), encoding="utf-8"
-    )
+    (output / "nodes.jsonl").write_text("\n".join(json.dumps(n) for n in NODES), encoding="utf-8")
+    (output / "edges.jsonl").write_text("\n".join(json.dumps(e) for e in EDGES), encoding="utf-8")
+    (intermediate / "schema.json").write_text(json.dumps(SCHEMA), encoding="utf-8")
     return tmp_path
 
 
@@ -147,9 +142,7 @@ def chunked_session_dir(session_dir: Path) -> Path:
     (intermediate / "chunk_node_index.json").write_text(
         json.dumps(CHUNK_NODE_INDEX), encoding="utf-8"
     )
-    (intermediate / "file_manifest.json").write_text(
-        json.dumps(FILE_MANIFEST), encoding="utf-8"
-    )
+    (intermediate / "file_manifest.json").write_text(json.dumps(FILE_MANIFEST), encoding="utf-8")
     return session_dir
 
 
@@ -292,6 +285,221 @@ class TestSearchLogic:
         assert kg.nodes_by_id.get("nonexistent") is None
 
 
+RARITY_NODES = [
+    {
+        "id": "project-rare-term",
+        "type": "Project",
+        "confidence": 0.95,
+        "attributes": {"name": {"value": "Zyxwvut Migration", "confidence": 1.0}},
+        "source_files": ["a.md"],
+    },
+    {
+        "id": "project-diffuse",
+        "type": "Project",
+        "confidence": 0.9,
+        "attributes": {
+            "name": {"value": "Other Project", "confidence": 1.0},
+            "notes": {
+                "value": (
+                    "This project touches migration tooling as a side effect, "
+                    "mentioned once in passing within a much longer description "
+                    "that is mostly about something else entirely unrelated"
+                ),
+                "confidence": 0.8,
+            },
+        },
+        "source_files": ["b.md"],
+    },
+]
+
+
+@pytest.fixture
+def rarity_session_dir(tmp_path: Path) -> Path:
+    output = tmp_path / "output"
+    output.mkdir()
+    intermediate = tmp_path / "intermediate"
+    intermediate.mkdir()
+    (output / "nodes.jsonl").write_text(
+        "\n".join(json.dumps(n) for n in RARITY_NODES), encoding="utf-8"
+    )
+    (output / "edges.jsonl").write_text("", encoding="utf-8")
+    (intermediate / "schema.json").write_text(json.dumps(SCHEMA), encoding="utf-8")
+    return tmp_path
+
+
+@pytest.fixture
+def rarity_kg(rarity_session_dir: Path) -> KnowledgeGraph:
+    return KnowledgeGraph(session_root=rarity_session_dir)
+
+
+WIDGET_NODES = [
+    {
+        "id": f"person-widget-{i}",
+        "type": "Person",
+        "confidence": 0.9,
+        "attributes": {"name": {"value": f"Widget Person {i}", "confidence": 1.0}},
+        "source_files": ["a.md"],
+    }
+    for i in range(5)
+] + [
+    {
+        "id": "organization-widget",
+        "type": "Organization",
+        "confidence": 0.9,
+        "attributes": {"name": {"value": "Widget Org", "confidence": 1.0}},
+        "source_files": ["a.md"],
+    }
+]
+
+
+@pytest.fixture
+def widget_session_dir(tmp_path: Path) -> Path:
+    output = tmp_path / "output"
+    output.mkdir()
+    intermediate = tmp_path / "intermediate"
+    intermediate.mkdir()
+    (output / "nodes.jsonl").write_text(
+        "\n".join(json.dumps(n) for n in WIDGET_NODES), encoding="utf-8"
+    )
+    (output / "edges.jsonl").write_text("", encoding="utf-8")
+    (intermediate / "schema.json").write_text(json.dumps(SCHEMA), encoding="utf-8")
+    return tmp_path
+
+
+@pytest.fixture
+def widget_kg(widget_session_dir: Path) -> KnowledgeGraph:
+    return KnowledgeGraph(session_root=widget_session_dir)
+
+
+def _invoke_search_nodes_tool(session_dir: Path, query: str, **kwargs) -> str:
+    """Invoke the real MCP mykg_search_nodes tool via its underlying .fn."""
+    from mykg.mcp_server import mcp
+
+    kg = KnowledgeGraph(session_root=session_dir)
+    lifespan_ctx = SimpleNamespace(kg=kg)
+    request_ctx = SimpleNamespace(lifespan_context=lifespan_ctx)
+    ctx = SimpleNamespace(request_context=request_ctx)
+
+    tool = next(t for t in mcp._tool_manager.list_tools() if t.name == "mykg_search_nodes")
+    return asyncio.run(tool.fn(query=query, ctx=ctx, **kwargs))
+
+
+class TestSearchBM25:
+    """BM25 ranking tests for KnowledgeGraph.search_nodes_bm25 / mykg_search_nodes.
+
+    TestSearchLogic above still covers name_index/alias_index directly — those
+    fields are kept, unchanged. These tests exercise the new BM25 ranking path,
+    which TestSearchLogic's direct name_index inspection never did.
+    """
+
+    def test_rare_term_outranks_diffuse_common_term_match(self, rarity_kg: KnowledgeGraph):
+        """A name built almost entirely from the query's rare term should
+        outrank a node where the query's term appears once in a long,
+        otherwise-unrelated attribute value — the thing substring-tier
+        scoring (flat 40 for any attribute hit) could not do."""
+        results = rarity_kg.search_nodes_bm25("Zyxwvut migration", limit=10)
+        assert results, "expected at least one match"
+        ids_in_order = [node["id"] for _score, node, _match_field in results]
+        assert ids_in_order[0] == "project-rare-term"
+
+    def test_zero_overlap_query_returns_empty(self, kg: KnowledgeGraph):
+        assert kg.search_nodes_bm25("zzz_nonexistent_query_term", limit=10) == []
+
+    def test_zero_overlap_tool_returns_no_match_message(self, session_dir: Path):
+        out = _invoke_search_nodes_tool(session_dir, "zzz_nonexistent_query_term")
+        assert out.startswith("No nodes found matching")
+
+    def test_type_filter_does_not_starve_valid_match(self, kg: KnowledgeGraph):
+        # "Acme" scores higher on Organization (exact-ish name/alias match) than
+        # on Person nodes, but a Person-type filter should still find Bob/Alice
+        # if they match on their own terms — here, filter to Person for a query
+        # that only Person nodes can satisfy at all, and confirm it's not
+        # starved by the higher-scoring, filtered-out Organization node.
+        results = kg.search_nodes_bm25("Alice Smith", limit=10, type_filter="Person")
+        assert results
+        assert all(node["type"] == "Person" for _score, node, _match_field in results)
+        ids = [node["id"] for _score, node, _match_field in results]
+        assert "person-alice" in ids
+
+    def test_multiword_query_partial_term_match(self, kg: KnowledgeGraph):
+        # "Alice Jones" shares one term with person-alice (Alice) and one term
+        # with person-bob (Jones) — both should score, neither via a literal
+        # substring match (the old code would find nothing for this phrase).
+        results = kg.search_nodes_bm25("Alice Jones", limit=10)
+        ids = {node["id"] for _score, node, _match_field in results}
+        assert "person-alice" in ids
+        assert "person-bob" in ids
+
+    def test_empty_corpus(self, tmp_path: Path):
+        output = tmp_path / "output"
+        output.mkdir()
+        intermediate = tmp_path / "intermediate"
+        intermediate.mkdir()
+        (output / "nodes.jsonl").write_text("", encoding="utf-8")
+        (output / "edges.jsonl").write_text("", encoding="utf-8")
+        (intermediate / "schema.json").write_text(json.dumps(SCHEMA), encoding="utf-8")
+        empty_kg = KnowledgeGraph(session_root=tmp_path)
+        assert empty_kg.bm25_index is None
+        assert empty_kg.search_nodes_bm25("anything", limit=10) == []
+
+    def test_exact_match_ranks_top_end_to_end(self, session_dir: Path):
+        out = _invoke_search_nodes_tool(session_dir, "Acme Corp", limit=5)
+        results = json.loads(out)
+        assert results[0]["id"] == "organization-acme"
+        assert results[0]["match_field"].startswith("exact")
+
+    def test_type_filter_skips_a_scored_node_of_another_type(self, widget_kg: KnowledgeGraph):
+        # "Widget" matches both Person and Organization nodes; filtering to
+        # Person must skip the scored Organization node rather than include
+        # it — exercises the continue inside the type-filter check, not just
+        # the "no valid match exists at all" case covered elsewhere.
+        results = widget_kg.search_nodes_bm25("Widget", limit=10, type_filter="Person")
+        assert results
+        assert all(node["type"] == "Person" for _score, node, _match_field in results)
+        assert "organization-widget" not in {node["id"] for _score, node, _mf in results}
+
+    def test_limit_truncates_more_matches_than_requested(self, widget_kg: KnowledgeGraph):
+        # 6 nodes match "Widget"; limit=2 must stop early rather than return
+        # everything — exercises the break once len(scored) reaches limit.
+        results = widget_kg.search_nodes_bm25("Widget", limit=2)
+        assert len(results) == 2
+
+    def test_match_field_substring_name_branch(self):
+        import tempfile
+
+        nodes = [
+            {
+                "id": "project-rare",
+                "type": "Project",
+                "confidence": 0.9,
+                "attributes": {"name": {"value": "Database Migration Service", "confidence": 1.0}},
+                "source_files": ["a.md"],
+            }
+        ]
+        with tempfile.TemporaryDirectory() as td:
+            tp = Path(td)
+            (tp / "output").mkdir()
+            (tp / "intermediate").mkdir()
+            (tp / "output" / "nodes.jsonl").write_text(
+                "\n".join(json.dumps(n) for n in nodes), encoding="utf-8"
+            )
+            (tp / "output" / "edges.jsonl").write_text("", encoding="utf-8")
+            (tp / "intermediate" / "schema.json").write_text(json.dumps(SCHEMA), encoding="utf-8")
+            kg = KnowledgeGraph(session_root=tp)
+            # "Migration" is a middle word — not an exact match, not a prefix —
+            # so this is the only way to reach the plain `substring:` branch.
+            results = kg.search_nodes_bm25("Migration", limit=10)
+            assert results
+            assert results[0][2] == "substring: Database Migration Service"
+
+    def test_match_field_alias_substring_branch(self, kg: KnowledgeGraph):
+        # "corporation" matches the "Acme Corporation" alias as a substring,
+        # not an exact alias match — exercises the non-exact alias branch.
+        results = kg.search_nodes_bm25("corporation", limit=10)
+        assert results
+        assert results[0][2] == "alias: Acme Corporation"
+
+
 class TestNeighbors:
     def test_neighbors_both(self, kg: KnowledgeGraph):
         edges = kg.edges_by_node.get("organization-acme", [])
@@ -312,11 +520,13 @@ class TestNeighbors:
 class TestPathFinding:
     def test_path_exists(self, kg: KnowledgeGraph):
         import networkx as _nx
+
         path = _nx.shortest_path(kg.graph, "person-alice", "organization-acme")
         assert path == ["person-alice", "organization-acme"]
 
     def test_path_between_persons(self, kg: KnowledgeGraph):
         import networkx as _nx
+
         undirected = kg.graph.to_undirected()
         path = _nx.shortest_path(undirected, "person-alice", "person-bob")
         assert len(path) == 3
@@ -324,6 +534,7 @@ class TestPathFinding:
 
     def test_no_directed_path_reversed(self, kg: KnowledgeGraph):
         import networkx as _nx
+
         with pytest.raises(_nx.NetworkXNoPath):
             _nx.shortest_path(kg.graph, "organization-acme", "person-alice")
 
@@ -331,6 +542,7 @@ class TestPathFinding:
 class TestStats:
     def test_graph_stats(self, kg: KnowledgeGraph):
         import networkx as _nx
+
         G = kg.graph
         assert G.number_of_nodes() == 3
         assert G.number_of_edges() == 2
@@ -393,6 +605,7 @@ class TestReadNote:
 class TestMCPServerRegistration:
     def test_mcp_server_has_tools(self):
         from mykg.mcp_server import mcp
+
         tool_names = [t.name for t in mcp._tool_manager.list_tools()]
         expected = [
             "mykg_search_nodes",
@@ -410,10 +623,11 @@ class TestMCPServerRegistration:
             "mykg_read_note",
             "mykg_list_sessions",
             "mykg_reload",
+            "mykg_schema_drift",
         ]
         for name in expected:
             assert name in tool_names, f"Tool '{name}' not registered"
-        assert len(tool_names) == 15
+        assert len(tool_names) == 16
 
 
 # ---------------------------------------------------------------------------
@@ -454,7 +668,8 @@ class TestSourceChunks:
         # person-alice only has 1 chunk in the fixture; force a smaller cap
         # to exercise total_chunks vs returned_chunks bookkeeping directly.
         kg_with_chunks.chunk_node_index_by_id["person-alice"] = [
-            "team.md::1", "partners.md::1",
+            "team.md::1",
+            "partners.md::1",
         ]
         result = _resolve_node_excerpt(kg_with_chunks, "person-alice", max_chunks=1)
         assert result["total_chunks"] == 2
@@ -511,9 +726,7 @@ class TestSourceChunks:
 
 def _fake_ctx(kg: KnowledgeGraph):
     """Minimal stand-in for FastMCP's Context — _get_kg only reads this path."""
-    return SimpleNamespace(
-        request_context=SimpleNamespace(lifespan_context=SimpleNamespace(kg=kg))
-    )
+    return SimpleNamespace(request_context=SimpleNamespace(lifespan_context=SimpleNamespace(kg=kg)))
 
 
 class TestMykgGetSourceTool:
@@ -551,3 +764,187 @@ class TestMykgGetSourceTool:
     def test_missing_chunk_artifacts_returns_error(self, kg: KnowledgeGraph):
         result = asyncio.run(mykg_get_source(_fake_ctx(kg), node_id="person-alice"))
         assert result.startswith("Error:")
+
+
+# ---------------------------------------------------------------------------
+# mykg_schema_drift: live, read-only schema drift report
+# ---------------------------------------------------------------------------
+
+DRIFT_SCHEMA = {
+    "concepts": [
+        {"type": "Person", "parent": None, "attributes": ["name"]},
+        {"type": "Organization", "parent": None, "attributes": ["name"]},
+        {"type": "Document", "parent": None, "attributes": ["name"]},
+        {"type": "Project", "parent": None, "attributes": ["name"]},
+        {"type": "Service", "parent": None, "attributes": ["name"]},
+    ],
+    "properties": [
+        {"name": n, "domain": d, "range": r, "attributes": []}
+        for n, d, r in [
+            ("works_at", "Person", "Organization"),
+            ("authored", "Person", "Document"),
+            ("published_by", "Document", "Organization"),
+            ("manages", "Person", "Project"),
+            ("owns", "Organization", "Project"),
+            ("runs", "Organization", "Service"),
+            ("depends_on", "Service", "Service"),
+            ("part_of", "Project", "Project"),
+            ("funds", "Organization", "Project"),
+            ("cites", "Document", "Document"),
+            ("employs", "Organization", "Person"),
+        ]
+    ],
+}
+
+
+def _n(nid: str, ntype: str) -> dict:
+    return {
+        "id": nid, "type": ntype, "confidence": 0.9,
+        "attributes": {"name": {"value": nid, "confidence": 0.9}},
+        "source_files": ["a.md"],
+    }
+
+
+def _e(eid: str, etype: str, frm: str, to: str) -> dict:
+    return {"id": eid, "type": etype, "from": frm, "to": to, "confidence": 0.9,
+            "attributes": {}, "method": "llm_extraction", "source_files": ["a.md"]}
+
+
+def _drift_session(root: Path, nodes: list[dict], edges: list[dict], schema: dict) -> Path:
+    (root / "output").mkdir(parents=True)
+    (root / "intermediate").mkdir()
+    (root / "output" / "nodes.jsonl").write_text(
+        "\n".join(json.dumps(n) for n in nodes), encoding="utf-8")
+    (root / "output" / "edges.jsonl").write_text(
+        "\n".join(json.dumps(e) for e in edges), encoding="utf-8")
+    (root / "intermediate" / "schema.json").write_text(json.dumps(schema), encoding="utf-8")
+    return root
+
+
+@pytest.fixture
+def drift_root(tmp_path: Path) -> Path:
+    nodes = [_n("person-a", "Person"), _n("organization-x", "Organization"), _n("document-d", "Document")]
+    edges = [
+        _e("edge-1", "works_at", "person-a", "organization-x"),
+        _e("edge-2", "authored", "person-a", "document-d"),
+        _e("edge-3", "published_by", "document-d", "organization-x"),
+    ]
+    return _drift_session(tmp_path / "s1", nodes, edges, DRIFT_SCHEMA)
+
+
+def _run_drift(root: Path) -> str:
+    from mykg.mcp_server import mykg_schema_drift
+
+    return asyncio.run(mykg_schema_drift(_fake_ctx(KnowledgeGraph(session_root=root))))
+
+
+class TestSchemaDriftTool:
+    def test_reports_unused_concepts_and_properties(self, drift_root: Path):
+        out = _run_drift(drift_root)
+        assert "Declared concepts: 5" in out
+        assert "Unused concepts: 2" in out
+        assert "- Project [prunable]" in out
+        assert "- Service [prunable]" in out
+        assert "Declared properties: 11" in out
+        assert "Unused properties: 8" in out
+        assert "- manages [prunable]" in out
+        assert "orphan" not in out.lower()
+        assert "No base schema in this session" in out
+        assert "mykg prune-schema --session s1 --preview" in out
+        assert "  none" in out  # no reverse drift
+
+    def test_invalid_utf8_lock_file_degrades(self, drift_root: Path):
+        (drift_root / "intermediate" / "base_schema_parsed.json").write_bytes(b"\xff\xfe\x80")
+        out = _run_drift(drift_root)
+        assert "could not be read" in out
+        assert "Unused concepts: 2" in out
+
+    def test_wrong_shaped_lock_file_degrades(self, drift_root: Path):
+        (drift_root / "intermediate" / "base_schema_parsed.json").write_text(
+            json.dumps({"locked_classes": 5}), encoding="utf-8")
+        out = _run_drift(drift_root)
+        assert "could not be read" in out
+        assert "Unused concepts: 2" in out
+
+    def test_always_null_attributes_listed(self, tmp_path: Path):
+        schema = {
+            "concepts": [{"type": "Person", "parent": None, "attributes": ["name", "email"]}],
+            "properties": [],
+        }
+        root = _drift_session(tmp_path / "s2", [_n("person-a", "Person")], [], schema)
+        out = _run_drift(root)
+        assert "Always-null attributes (info only, never pruned):" in out
+        assert "  - Person: email" in out
+
+    def test_no_null_section_when_none(self, drift_root: Path):
+        assert "Always-null" not in _run_drift(drift_root)
+
+    def test_malformed_rows_give_clear_error(self, tmp_path: Path):
+        root = _drift_session(tmp_path / "s3", [_n("p", "Person")], [], {"concepts": [{"type": "Person"}, 5], "properties": []})
+        out = _run_drift(root)
+        assert out.startswith("Cannot compute schema drift:")
+
+    def test_session_name_shell_quoted(self, tmp_path: Path):
+        root = _drift_session(tmp_path / "my session;x", [_n("person-a", "Person")], [], DRIFT_SCHEMA)
+        out = _run_drift(root)
+        assert "--session 'my session;x' --preview" in out
+
+    def test_read_only_writes_nothing(self, drift_root: Path):
+        before = sorted(p.relative_to(drift_root) for p in drift_root.rglob("*"))
+        _run_drift(drift_root)
+        after = sorted(p.relative_to(drift_root) for p in drift_root.rglob("*"))
+        assert before == after
+        assert not (drift_root / "intermediate" / "schema_drift.json").exists()
+
+    def test_after_prune_is_consistent(self, drift_root: Path):
+        from mykg.exporters.neo4j._common import load_session
+        from mykg.schema_drift import analyze_drift, apply_prune, plan_prune
+
+        nodes, edges, schema = load_session(drift_root)
+        report = analyze_drift(schema, iter(nodes), iter(edges), None)
+        apply_prune(plan_prune(report), drift_root / "intermediate", report)
+        out = _run_drift(drift_root)
+        assert "Declared concepts: 3" in out
+        assert "Unused concepts: 0" in out
+        assert "Declared properties: 3" in out
+        assert "Unused properties: 0" in out
+
+    def test_locked_entry_reported_as_locked(self, drift_root: Path):
+        (drift_root / "intermediate" / "base_schema_parsed.json").write_text(
+            json.dumps({
+                "locked_classes": [{"type": "Project"}],
+                "locked_properties": [{"name": "manages"}],
+            }),
+            encoding="utf-8",
+        )
+        out = _run_drift(drift_root)
+        assert "1 locked concept(s), 1 locked property(ies)" in out
+        assert "- Project [locked]" in out
+        assert "- manages [locked]" in out
+        assert "- Service [prunable]" in out
+
+    def test_unreadable_base_schema_is_noted(self, drift_root: Path):
+        (drift_root / "intermediate" / "base_schema_parsed.json").write_text("{nope", encoding="utf-8")
+        out = _run_drift(drift_root)
+        assert "could not be read" in out
+
+    def test_empty_graph(self, tmp_path: Path):
+        root = _drift_session(tmp_path / "empty", [], [], DRIFT_SCHEMA)
+        out = _run_drift(root)
+        assert "0 nodes, 0 edges" in out
+        assert "Unused concepts: 5" in out
+        assert "Unused properties: 11" in out
+
+    def test_reverse_drift_reported(self, tmp_path: Path):
+        nodes = [_n("person-a", "Person"), _n("gadget-g", "Gadget")]
+        edges = [_e("edge-1", "invented", "person-a", "gadget-g")]
+        root = _drift_session(tmp_path / "rev", nodes, edges, DRIFT_SCHEMA)
+        out = _run_drift(root)
+        assert "node type Gadget: 1 node(s)" in out
+        assert "edge type invented: 1 edge(s)" in out
+
+    def test_tool_is_read_only_annotated(self):
+        from mykg.mcp_server import mcp
+
+        tool = next(t for t in mcp._tool_manager.list_tools() if t.name == "mykg_schema_drift")
+        assert tool.annotations.readOnlyHint is True

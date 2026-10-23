@@ -18,6 +18,7 @@ This document explains how **myKG** works at a conceptual level: the pipelines, 
   - [Orphan-Connection Pass](#orphan-connection-pass)
   - [Name Normalization](#name-normalization)
 - [Merge Pipeline](#merge-pipeline)
+- [Schema Drift and Pruning](#schema-drift-and-pruning)
 - [Output Formats](#output-formats)
 - [MCP Server (`mykg mcp-serve`)](#mcp-server-mykg-mcp-serve)
 - [Skill vs MCP — Capability Comparison](#skill-vs-mcp--capability-comparison)
@@ -38,11 +39,11 @@ This document explains how **myKG** works at a conceptual level: the pipelines, 
 | `mykg extract-graph <dir>` | Reads Markdown files, induces a schema, extracts entities and relationships, and exports the graph |
 | `mykg merge-graphs <A> <B>` | Combines two independently-produced sessions into one unified knowledge graph |
 | `mykg fetch-web <url>` | Crawls a website (or shallow-clones a GitHub repo) into a local folder that is a ready-made `extract-graph` input |
-| `mykg mcp-serve` | Starts an MCP server exposing a completed knowledge graph session for LLM-powered Q&A via 13 read-only tools |
+| `mykg mcp-serve` | Starts an MCP server exposing a completed knowledge graph session for LLM-powered Q&A via 15 read-only tools |
 
 Both pipelines run as a sequence of named steps. All intermediate state is written to disk after every step, so any step can be re-entered without repeating upstream work.
 
-The LLM layer is provider-pluggable: six adapters ship out of the box (Anthropic, OpenAI, Ollama, OpenRouter, Claude CLI, and **Agent**). The Agent provider is unusual — instead of calling an HTTP API or a subprocess, it writes LLM tasks to a session-local inbox folder and polls an outbox for answers supplied by a Claude Code skill running on the user's side. The 12 pipeline steps and the orchestrator do not know which adapter is active.
+The LLM layer is provider-pluggable: seven adapters ship out of the box (Anthropic, OpenAI, Gemini, Ollama, OpenRouter, Claude CLI, and **Agent**). The Agent provider is unusual — instead of calling an HTTP API or a subprocess, it writes LLM tasks to a session-local inbox folder and polls an outbox for answers supplied by a Claude Code skill running on the user's side. The 12 pipeline steps and the orchestrator do not know which adapter is active.
 
 <p align="center">
   <img src="diagrams/system-overview.png" width="80%" style="vertical-align:middle;">
@@ -93,7 +94,7 @@ The merge pipeline (`mykg merge-graphs`) runs 12 steps. `schema_validate`, `huma
 | # | Step | LLM | What it does | Key outputs |
 |---|---|---|---|---|
 | 1 | `merge_setup` | — | Loads both source sessions, prefixes all file keys with their session name (e.g. `session_a/notes.md`), copies shard files into the new session, and records full file provenance | `source_map.json` |
-| 2 | `merge_schema` | ✓ (3 calls) | Runs the same three-stage schema merge chain as Pass 1: algorithmic union of both schemas, LLM harmonization, LLM quality review | `schema.json`, `schema.ttl`, `schema_history/` |
+| 2 | `merge_schema` | ✓ (2 calls) | Algorithmic union of both schemas, then LLM harmonization and LLM quality review using merge-specific, concept-preserving prompts | `schema.json`, `schema.ttl`, `schema_history/` |
 | 3 | `schema_validate` | — | Reused from extract pipeline | `schema_validate.done` |
 | 4 | `human_review` | — | Optional gate; controlled by `merge_graphs.human_review` config flag | `schema_approved.flag` |
 | 5 | `schema_flatten` | — | Reused from extract pipeline | `flattened_schema.json` |
@@ -315,7 +316,7 @@ As each batch's LLM call resolves — success or failure — its result is writt
 
 **Algorithmic merge.** All batch proposals are merged without another LLM call. Exact duplicates are collapsed first, then near-duplicates are resolved using string normalization and, if you supplied a SKOS thesaurus, vocabulary-aware synonym matching. Attributes from duplicate entries are unioned. If you supplied a locked base schema, those classes and properties are protected — the LLM cannot rename, remove, or restructure them.
 
-**Harmonization.** A single LLM call sees both the merged schema and the raw batch proposals. It collapses semantic near-duplicates the algorithmic step missed — for example, collapsing "MilitaryUnit" and "ArmyUnit" into one canonical type. The original is kept if the response is unparseable. The same call is used in the merge pipeline via `harmonize_schema_for_merge`.
+**Harmonization.** A single LLM call sees both the merged schema and the raw batch proposals. It collapses semantic near-duplicates the algorithmic step missed — for example, collapsing "MilitaryUnit" and "ArmyUnit" into one canonical type. The original is kept if the response is unparseable. The merge pipeline has its own variant, `harmonize_schema_for_merge`, with a separate prompt: it relates near-duplicates by hierarchy instead of collapsing them, and never deletes a concept (see Cross-Session Merge below). The two are intentionally distinct — this Pass 1 stage still collapses.
 
 **Quality review.** A second LLM call removes over-narrow named-entity singletons (a concept like "FourthAirForce" should be an instance of MilitaryUnit, not a concept type), fixes singleton types with no meaningful abstraction, and ensures every concept has at least a name attribute.
 
@@ -362,14 +363,16 @@ After each LLM call, the pipeline validates the response: edges whose type is no
 | **Stateful chunks** | Yes, within each file | Yes, within each virtual batch | No (each batch starts fresh) |
 | **Parallelism** | Up to `max_workers` files at once, but large files are serial bottlenecks | Limited by virtual batch count | All batches independent; workers stay busy |
 | **Provenance** | Exact: every entity traces to one source file | Exact across virtual-batch members | Approximate: an entity inherits all source files in its batch (assembler dedup collapses the overlap; no confidence inflation) |
-| **Controlled by** | File count and sizes | `concat_batch_token_target` | `batch_token_target` |
+| **Controlled by** | File count and sizes; `per_file_token_target` (per-file truncation cap) | `concat_batch_token_target` | `batch_token_target` |
 | **Best for** | Self-contained documents, audit/citation needs | Many small files, moderate cross-file context | Maximum throughput and extraction density |
 
 **`per_file`** keeps each source file as its own extraction unit. Each file's chunks are processed sequentially (with `stateful_chunks` on, the output of chunk N is fed as context to chunk N+1 to keep entity IDs stable). Different files run in parallel up to `max_workers`. This is the most conservative mode: provenance is clean (every entity traces to exactly one source file), and the LLM never sees text from unrelated documents in the same call. The downside is parallelism — if one file has 10 chunks and the rest have 1 each, the workers finish the small files quickly, then sit idle while the one large file grinds through chunk by chunk. The large file is a serial bottleneck regardless of `max_workers`.
 
+`per_file_token_target` bounds per-file cost: a file whose token count exceeds it is truncated to its first N tokens (the tail is dropped) before chunking, logged at WARNING, and recorded in `intermediate/oversized_files.json` (the manifest is absent when nothing was truncated). It is the `per_file` analogue of `concat`'s `concat_batch_token_target` and `batch_chunks`' `batch_token_target` — a guardrail against a single pathologically large file producing an unbounded run of serial LLM calls. Setting it to `0` disables the cap (unlimited, the pre-cap behaviour). Because the cap only applies to `per_file`, the shared extraction engine defaults it off for the `concat` and surgical schema-gap callers, which never truncate.
+
 **`concat`** merges small files into virtual batches up to `concat_batch_token_target`. Files below the target are concatenated together; a file that exceeds it stays its own batch. This cuts the number of LLM calls when you have many tiny files that would otherwise waste per-call overhead, and gives the model moderate cross-file context (related files, grouped by directory, in one prompt). Within each virtual batch, chunks still process sequentially when `stateful_chunks` is on. Because shards are real-file-keyed (post the de-virtualization fix), `--append` re-extracts only new/changed files like the other modes — the virtual batching is recomputed per run but unchanged files are skipped via their real-keyed shards.
 
-**`batch_chunks`** (the default) chunks every file first, then packs all chunks across the corpus into token-bounded batches sized to `batch_token_target`, ignoring file boundaries. Every batch is an independent LLM call, so workers stay saturated and a single large file never bottlenecks the run — its chunks simply distribute across batches alongside everyone else's. It also gives the densest extraction (the model sees a full token budget of material per call) and per-file incremental `--append` (only changed files re-extract). The trade-off is provenance: a mixed batch's result is attributed to every member file, so a node's `source_files` may over-list — the assembler's stable-ID/edge-hash dedup collapses the duplication at assembly time, but per-file citation is less precise than `per_file` or `concat`. Set `batch_per_file: true` to keep a file's chunks from sharing a batch with other files when precise provenance matters.
+**`batch_chunks`** (the default) chunks every file first, then packs all chunks across the corpus into token-bounded batches sized to `batch_token_target`, ignoring file boundaries. Every batch is an independent LLM call, so workers stay saturated and a single large file never bottlenecks the run — its chunks simply distribute across batches alongside everyone else's. It also gives the densest extraction (the model sees a full token budget of material per call) and per-file incremental `--append` (only changed files re-extract). The trade-off is provenance: a mixed batch's result is attributed to every member file, so a node's `source_files` may over-list — the assembler's stable-ID/edge-hash dedup collapses the duplication at assembly time, but per-file citation is less precise than `per_file` or `concat` (see *`--append` change-detection limits* below for how this over-attribution also affects re-extraction of modified files). Set `batch_per_file: true` to keep a file's chunks from sharing a batch with other files when precise provenance matters.
 
 As a rough sense of the call-count difference: a small test corpus of five files yields **5 calls** under `per_file`, **2 virtual batches** under `concat`, and **11 batches** under `batch_chunks` (more, smaller, evenly-sized calls that keep all workers busy).
 
@@ -397,22 +400,44 @@ This keeps the graph consistent — instances of a newly-added type appear in BO
 
 ### Mode Comparison
 
-| | Fresh extract | `--base-schema` | `--append` | `--append-with-grow-schema` | Orphan schema-gap restart |
-|---|---|---|---|---|---|
-| **Pass 1** | All files | All files, locked base injected | Skipped | Changed files only, locked | Skipped (schema already updated) |
-| **Schema** | Induced from scratch | Induced + locked entries preserved | Frozen (reused from prior run) | Grown: locked entries preserved, LLM may add new | Grown: new properties added by orphan pass |
-| **Pass 2** | All files | All files | New/modified files only | New/modified + surgical back-fill of old chunks | Surgical re-extraction of affected chunks only |
-| **Requires existing session** | No | No | Yes | Yes | Automatic (mid-run) |
-| **LLM cost** | O(all files) | O(all files) | O(new files) | O(new files) + bounded back-fill | O(affected chunks) |
-| **Schema source** | LLM proposals | LLM proposals + user TTL | `schema.json` (unchanged) | Session `schema.ttl` auto-loaded as locked base | `orphan_connect` LLM proposal |
-| **Can add concepts** | Yes | Yes (around locked) | No | Yes (around locked) | No |
-| **Can add properties** | Yes | Yes (around locked) | No | Yes (around locked) | Yes |
-| **Can add instances** | Yes | Yes | Yes (new files only) | Yes (new + back-filled old) | Yes (affected chunks) |
-| **Can rename/remove existing** | N/A | No (locked) | N/A (frozen) | No (locked) | No |
-| **Back-fill old files** | N/A | N/A | No | Yes, surgically | Yes, surgically |
-| **`--base-schema` compatible** | Yes | N/A | Yes | No (auto-loads session schema) | Yes |
-| **`--from-step` compatible** | Yes | Yes | Not in same command | Not in same command | N/A (automatic) |
-| **Empty delta behavior** | N/A | N/A | N/A | Collapses to plain `--append` | No restart if no new properties |
+| | Fresh extract | `--base-schema` | `--append` | `--append --sync` (= `--update`) | `--append-with-grow-schema` | `--append-with-grow-schema --sync` | Orphan schema-gap restart |
+|---|---|---|---|---|---|---|---|
+| **Pass 1** | All files | All files, locked base injected | Skipped | Skipped | Changed files only, locked | Changed files only, locked | Skipped (schema already updated) |
+| **Schema** | Induced from scratch | Induced + locked entries preserved | Frozen (reused from prior run) | Frozen | Grown: locked entries preserved, LLM may add new | Grown: locked entries preserved, LLM may add new | Grown: new properties added by orphan pass |
+| **Pass 2** | All files | All files | **New files only** | New + re-extracted modified files | Changed files + surgical back-fill of old chunks | New + re-extracted modified + surgical back-fill | Surgical re-extraction of affected chunks only |
+| **Handles deletions** | N/A (rebuilt) | N/A | **No — warns only** | **Yes** | Only with `--sync` | **Yes** | N/A |
+| **Handles modifications** | N/A (rebuilt) | N/A | **No — warns only** | **Yes** | Only with `--sync` | **Yes** | N/A |
+| **Requires existing session** | No | No | Yes | Yes | Yes | Yes | Automatic (mid-run) |
+| **LLM cost** | O(all files) | O(all files) | O(new files) | O(new + modified files) | O(changed files) + bounded back-fill | O(new + modified files) + bounded back-fill | O(affected chunks) |
+| **Schema source** | LLM proposals | LLM proposals + user TTL | `schema.json` (unchanged) | `schema.json` (unchanged) | Session `schema.ttl` auto-loaded as locked base | Session `schema.ttl` auto-loaded as locked base | `orphan_connect` LLM proposal |
+| **Can add concepts** | Yes | Yes (around locked) | No | No | Yes (around locked) | Yes (around locked) | No |
+| **Can add properties** | Yes | Yes (around locked) | No | No | Yes (around locked) | Yes (around locked) | Yes |
+| **Can add instances** | Yes | Yes | Yes (new files only) | Yes (new + modified) | Yes (changed + back-filled old) | Yes (new + modified + back-filled old) | Yes (affected chunks) |
+| **Can REMOVE instances** | N/A (rebuilt) | N/A | **No** | **Yes** (deleted files' nodes) | Only with `--sync` | **Yes** (deleted files' nodes) | No |
+| **Can rename/remove existing schema** | N/A | No (locked) | N/A (frozen) | N/A (frozen) | No (locked) | No (locked) | No |
+| **Back-fill old files** | N/A | N/A | No | No | Yes, surgically | Yes, surgically | Yes, surgically |
+| **`--base-schema` compatible** | Yes | N/A | Yes | Yes | No (auto-loads session schema) | No (auto-loads session schema) | Yes |
+| **`--from-step` compatible** | Yes | Yes | Not in same command | Not in same command | Not in same command | Not in same command | N/A (automatic) |
+| **Empty delta behavior** | N/A | N/A | N/A | Degrades to plain `--append` (no prune, no eviction) | Collapses to plain `--append`; zero Pass 1 calls | Degrades to plain `--append-with-grow-schema`; zero Pass 1 calls | No restart if no new properties |
+
+`--update` is a convenience alias for `--append --sync`, expanded before the `--sync requires --append` validation gate (D58). `--append-with-grow-schema` already implies `--append`, so the last column needs only those two flags.
+
+The three flags are **orthogonal axes**: `--append` decides *which files* are processed, `--sync` decides *whether existing entries are reconciled* (modified re-extracted, deleted removed), and `-with-grow-schema` decides *whether the schema may grow*. The last column is the one to reach for when new vocabulary arrives in a document that was **edited** rather than added — the locked Pass 1 sees only new files unless `--sync` widens it to modified ones too.
+
+### `--append` change-detection limits
+
+`--append` re-extracts new and content-modified files (detected by SHA-256 / content hash) against the frozen schema; unchanged files are skipped via their real-file-keyed shards. When a file's content changes, its own stale shard is evicted so it is re-extracted (rather than silently shadowed by the prior shard). But how completely re-extracting a *modified* file removes its previous nodes depends on the prep mode, because of Pass 2 over-attribution: a mixed batch's single LLM result is fanned out to **every** member file's shard, so a file's nodes also live in its batch siblings' shards.
+
+| Prep mode | Modified file re-extracted? | Old nodes fully removed on modify/blank? | Why |
+|---|---|---|---|
+| `per_file` | Yes — its own shard is evicted and re-run | Yes | Each file is its own LLM call and its own shard; no fan-out, so nothing is smeared into a sibling |
+| `batch_chunks` + `batch_per_file: true` | Yes — its own shard is evicted and re-run | Yes | A batch never mixes files, so there is no fan-out — the file's own shard is the only one carrying its nodes |
+| `batch_chunks` (default, `batch_per_file: false`) | Yes — its own shard is evicted and re-run | **No (partial)** | The prior mixed batch fanned the file's nodes into every batch sibling's shard; siblings are unchanged, so neither `--append` nor `--sync` re-extracts them and the node can survive via a sibling shard |
+| `concat` | Yes — its own shard is evicted and re-run | **No (partial)** | Same over-attribution as `batch_chunks`: a multi-file virtual batch fans its result to every member shard |
+
+**Deletion needs `--sync` (= `--update`), and is bounded by the same fan-out.** Removing a source file drops its nodes only on `--append --sync`; plain `--append` detects the deletion and warns, but leaves the graph untouched (D58). And the completeness column above applies to deletion too: under `per_file` or `batch_per_file: true` the removal is exact, while the mixed-batch modes can leave the deleted file's nodes alive in a sibling's shard — the same over-attribution, not a separate limitation.
+
+To guarantee a modified file's old nodes are fully removed on `--append --sync`, use `per_file` mode **or** set `batch_per_file: true` under `batch_chunks` — both keep a file's chunks out of any other file's batch, so there is nothing to smear. Only the mixed-batch modes (`batch_chunks` with `batch_per_file: false`, and `concat`) leave partial survivals; there, a subsequent full re-extract (`--from-step pass2`) clears them. Fully removing the smeared copies *without* re-extracting the whole batch would require re-attributing a mixed batch's result per file — deliberately out of scope for the shard-eviction fix.
 
 ### Assembly and Deduplication
 
@@ -462,7 +487,20 @@ On large corpora, the total number of names across all concept types can easily 
 
 **File namespacing.** Before any merging begins, all file-keyed structures from both sessions are prefixed with their session name — for example, `session_a/notes.md` and `session_b/notes.md`. This makes same-filename documents from different sessions structurally distinct, so node deduplication can work correctly across both.
 
-**Schema merge.** Both session schemas are treated as batch proposals and run through the same three-stage chain as Pass 1 schema induction: algorithmic merge, harmonization, and quality review.
+**Schema merge.** Both session schemas are treated as proposals and run through a three-stage chain: algorithmic merge (no LLM), then LLM harmonization, then LLM quality review. The two LLM stages use merge-specific prompts and merge-specific functions (`harmonize_schema_for_merge`, `review_schema_quality_for_merge`) — they are deliberately *not* the same code as Pass 1's stages, so the concept-preservation rules below apply to `merge-graphs` alone and `extract-graph` behaviour is unchanged.
+
+**Concept preservation.** The merge quality stage used to delete concepts — folding `Employee` into `Person`, `Company` into `Organization` — which destroyed the is-a hierarchy the algorithmic merge had just built. Because stable node IDs encode their concept type as a prefix and are assigned during assembly, deleting a class strands every instance that names it: the graph ends up with nodes whose `rdf:type` has no declared `rdfs:Class`, and one entity split across two node IDs. Two mechanisms now prevent this:
+
+- **Prompt rules.** `merge_quality_system.txt` and `merge_harmonize_system.txt` instruct the model to *re-parent* a redundant or over-specific concept rather than remove it. A generated block naming every concept that must survive, along with the current is-a edges, is appended to both system prompts — the same injection mechanism as the locked base-schema block, but always active on the merge path.
+- **Code guard.** `_restore_deleted_concepts` re-inserts any concept missing from the LLM's response, with its original parent and attributes. If the restored concept's parent also vanished, the parent is reset to `null`, since the validator requires every non-null parent to name a declared class.
+
+**The guard is conditional on the thesaurus, per concept pair.** A removal is honoured only when a SKOS thesaurus declares `skos:exactMatch` or `skos:closeMatch` between the missing concept and one that survives — the collapse then proceeds as before and is logged as `concept_collapsed_by_thesaurus`. A thesaurus that relates unrelated terms does not license other deletions. With no `--thesaurus`, every deletion is restored and logged as `concept_restored`. This keeps genuine vocabulary-backed collapsing working while blocking the model from guessing.
+
+**Instance migration on collapse.** Removing a concept from the schema does not touch the instances that name it, and a stable node ID is derived from the node's type — so a collapse strands those instances and splits one entity across two IDs. Every collapse is therefore recorded as a `{removed: surviving}` map in `intermediate/type_remap.json`, written by the schema-merge step (the merge manifest is not written until the final step, long after assembly). A merge-only assembly step applies the map before stable IDs are assigned, so both occurrences resolve to the same ID and merge through the assembler's ordinary deduplication rules. The extract pipeline keeps its own unmodified assembly step.
+
+**Attribute conflicts.** After the LLM stages, each concept's final attribute list is scanned for near-duplicates and any pair is recorded as an `attribute_synonym` event. Both names are always kept — the merge prompts forbid dropping an attribute that either session validated. Note the real limit of the detector: `synonym_match` normalizes case and delimiters, so it relates formatting variants (`birthDate` / `birth_date`) but not semantic ones (`headquarters` / `headquarters_location`), which need a thesaurus entry to be detected.
+
+All of these events are appended to the merge manifest's `schema_synonym_log`, alongside the structural-conflict events from the algorithmic merge.
 
 **Re-extraction.** When the merged schema introduces relationship types that were absent from one session's original schema, those relationship types have no instances in that session's files. The pipeline offers three strategies: accept the gaps without any re-extraction, surgically re-extract only the chunks containing nodes of the new property's domain or range type, or re-run Pass 2 on all files from both sessions.
 
@@ -475,13 +513,101 @@ The merge pipeline reuses all extract pipeline steps from schema validation onwa
 | File | Written by | Contents |
 |---|---|---|
 | `intermediate/source_map.json` | `merge_setup` | Maps every namespaced file key (`session_alias/filename`) to provenance: original session name, alias, SHA256 content hash, and role (`input_a` / `input_b`) |
-| `intermediate/merge_manifest.json` | `merge_manifest` | Audit record: source session names, merge timestamp, schema synonym collapse events, re-extraction strategy used, and schema deltas for each source session |
+| `intermediate/merge_manifest.json` | `merge_manifest` | Audit record: source session names, merge timestamp, re-extraction strategy used, schema deltas for each source session, and `schema_synonym_log` — synonym collapses plus the structural-conflict events (`parent_conflict`, `domain_range_conflict`) and concept-preservation events (`concept_restored`, `concept_collapsed_by_thesaurus`, `attribute_synonym`) |
 
 All other intermediate files (`schema.json`, `flattened_schema.json`, `raw_extractions.json`, `edge_metadata.json`, `nodes.json`, `merge_log.json`) use the same format as the extract pipeline and are produced by reused steps.
 
 ### Merge Re-entry
 
 To resume or correct a merge session, pass `--session <merged-session-name>` when re-running `mykg merge-graphs`. The orchestrator resumes from the last incomplete step using the same sentinel mechanism as the extract pipeline. To restart from a specific step, use `--from-step <step>` with the same step names shown in the Merge Pipeline Steps table above.
+
+---
+
+## Schema Drift and Pruning
+
+The induced schema is an append-only vocabulary. Pass 1 and `--append-with-grow-schema` add concepts and properties; nothing removes them. The graph, by contrast, reconciles with the documents on `--append --sync`. After documents are deleted, `schema.json` can therefore declare concepts with zero instances and properties with zero edges. That gap is **schema drift**. Two session commands (design decision D62) detect and repair it. Neither is a pipeline step, neither loads an LLM adapter, and both refuse to run while a step in `pipeline_state.json` is `running`.
+
+### Workflow
+
+```
+mykg extract-graph docs/ --session S --append --sync     # instances reconcile
+mykg detect-schema-drift --session S                     # report, writes schema_drift.json
+mykg prune-schema --session S --preview                  # plan, writes schema_prune_plan.json
+# optionally edit intermediate/schema_prune_plan.json
+mykg prune-schema --session S --plan mykg_sessions/S/intermediate/schema_prune_plan.json
+```
+
+`mykg prune-schema --session S` with neither flag computes the plan fresh and applies every `prunable` entry in one shot. `--preview` and `--plan` are mutually exclusive.
+
+Detection streams `output/nodes.jsonl` and `output/edges.jsonl` once and compares them with `intermediate/schema.json`. Unused entries are labelled "unused" (not "orphaned": an orphan is a node with no edges, D30).
+
+### Classification
+
+Each unused entry is classified, first match wins:
+
+| Class | Rule | Pruned? |
+|---|---|---|
+| `locked` | declared by the user-supplied `--base-schema` (`base_schema_parsed.json`, D27) | never |
+| `structural` | zero own instances but needed: an instantiated descendant, the domain/range of a surviving property, or a surviving child | no |
+| `prunable` | zero instances in its whole subtree, unlocked, no surviving property or child depends on it | yes |
+
+A property survives when it is locked or has at least one edge (extraction and orphan-inferred edges both count). A zero-edge unlocked property is `prunable`, which also covers the cascade from a removed domain/range concept. There is no re-parenting: a concept is prunable only when its whole subtree is. Attributes are never pruned; always-null attributes and undeclared node/edge types (reverse drift) are reported only.
+
+### Plan file
+
+`intermediate/schema_prune_plan.json` holds `schema_fingerprint` (sha256 over `schema.json`, per-type node and edge counts, and the locked concept/property names, so a changed `base_schema_parsed.json` also makes plans and drift records stale), `created_at`, `remove[]` (`kind`, `name`, `reason`), informational `keep[]`, and `totals` (`before`/`after` concept and property counts). Delete entries from `remove` to veto them. Nothing applies the plan except an explicit `prune-schema --plan`. `apply_prune` requires a freshly computed report and always validates the plan against it. At apply time detection is re-run and the whole apply aborts, changing nothing, when the fingerprint is stale (documents synced or schema edited since the preview), when an entry is `locked`, `structural`, has gained instances, or is not in the schema, or when removing a concept would leave a kept property pointing at it. Edits can only shrink a plan; they cannot force pruning of anything in use. Only `remove` is honoured: `keep` and `totals` in an edited plan are ignored and recomputed, and duplicate entries are dropped. An empty plan prints `Nothing to prune.` and writes no backup, history entry or other file. Malformed JSONL, lock or schema content raises a clean error instead of a traceback.
+
+### What apply changes
+
+| File | Change |
+|---|---|
+| `intermediate/schema.json` | pruned entries removed; previous copy kept as `schema.pre_prune.json` |
+| `intermediate/schema.ttl` | regenerated (atomic write) |
+| `intermediate/schema_history/<seq>_schema_prune.json` | delta with `concepts_removed` / `properties_removed` and a `pruned` list of reasons (trigger `schema_prune`, D36) |
+| `intermediate/flattened_schema.json` | regenerated inside `apply_prune` via `flatten_schema`, only if the file already exists (no step invalidation) |
+| `intermediate/schema_drift.json` | re-recorded against the pruned schema |
+| `output/nodes.jsonl`, `edges.jsonl`, `knowledge_graph.ttl`, `knowledge_graph_validation.json`, `walkthrough.md`, NetworkX / Obsidian / Neo4j CSV exports | regenerated by re-running only `validate_graph` (no LLM); exports and the walkthrough follow the config toggles, so an export enabled only by a CLI flag on the earlier run is not refreshed (the closing message lists what was regenerated) |
+
+Untouched: `nodes.json`, `edge_metadata.json`, `raw_extractions*`, shards, `chunk_node_index.json` and step results in `pipeline_state.json`. No instance is ever pruned; only zero-instance entries are eligible. To remove instances, change the sources and run `--append --sync` (D58).
+
+### Continuing the session after a prune
+
+| Next command | Effect |
+|---|---|
+| `--append` | Pass 1 skipped, frozen pruned schema. Documents about a removed type are silently dropped or mis-typed |
+| `--append-with-grow-schema` | Pruned `schema.ttl` becomes the locked base; locked Pass 1 on changed files can re-add removed types and back-fills old chunks (D52) |
+| `--append --sync` | Instances reconcile; schema untouched. Detect again afterwards |
+| `--from-step pass2` / `--pass2-kg-extraction-only` | Re-extracts against the pruned schema |
+| `--from-step pass1` / a fresh run | Re-induces the schema; the prune is superseded |
+
+Typical order over a session's life: sync, then detect, then prune. Never re-induce the schema on every sync.
+
+### Undo
+
+`flattened_schema.json` is not regenerated automatically on undo (the `schema_flatten` step is skipped while that file exists, so it would otherwise keep describing the pruned schema). The sequence the CLI prints:
+
+1. Copy `intermediate/schema.pre_prune.json` over `intermediate/schema.json`.
+2. `mykg approve-schema --session S` (regenerates `schema.ttl`).
+3. Delete `intermediate/flattened_schema.json`.
+4. `mykg extract-graph <dir> --session S --from-step validate_graph`.
+5. Re-run `mykg detect-schema-drift --session S`.
+
+Do not use `--from-step schema_flatten`: it deletes the Pass 2 outputs. Undo restores the schema exactly as it was before the most recent prune, so it is only appropriate before later runs have grown or changed the schema (the backup is overwritten by the next prune).
+
+### Consumers
+
+The walkthrough gains a "Schema Health" section (section 5, later sections shift by one) whenever `schema_drift.json` exists, marked stale when its fingerprint no longer matches. The read-only MCP tool `mykg_schema_drift` computes the report live from the graph as loaded in memory (call `mykg_reload` first if the session changed on disk). It never writes `schema_drift.json` and never prunes. Its output has a header (session, node/edge counts), a lock notice (no base schema; `Locks read ... N locked concept(s), M locked property(ies)`; or the lock file could not be read, so locks are not applied and pruning should wait), unused concepts as `name [classification]: reason`, unused properties as `name [classification] (domain -> range): reason`, an "Always-null attributes (info only, never pruned)" section only when any exist, reverse drift (or `none`), and a closing hint with the shell-quoted `mykg prune-schema --session <name> --preview`. Malformed in-memory data yields `Cannot compute schema drift: <error>`.
+
+### Limitations
+
+- One backup: `schema.pre_prune.json` is overwritten by the next prune.
+- The fingerprint covers the schema, per-type node/edge counts and the locked names, not instance content.
+- Writes during apply are not one transaction. They are ordered (backup, derived files, then `schema.json` plus its history delta last) so that re-running the prune is idempotent after a crash; a crash after `schema.json` lands loses at most the history record, and `mykg approve-schema` repairs a stale `schema.ttl`.
+- No cross-process lock: both commands only refuse to run while a step in `pipeline_state.json` is `running`.
+- `validate_graph` regenerates `nodes.jsonl` and `edges.jsonl` from `nodes.json` and `edge_metadata.json`, so they match the originals only after a normal run produced those files.
+- Optional exports (NetworkX, Obsidian vault, Neo4j CSV) are refreshed only when their config toggles are on; one enabled only by a CLI flag on the earlier run is not.
+- Locks come only from `base_schema_parsed.json`, which records a real `--base-schema` given on a fresh run. `--append-with-grow-schema` runs through the append ingest path, which does not write that file, so grow-schema does not lock the schema. A missing lock file means no locks (the commands print a notice).
+- No config keys. The article's grace-period decay tier (prune only after N cycles at zero) is not implemented.
 
 ---
 
@@ -515,6 +641,18 @@ Seven graph formats are written to `output/networkx_output/`: GML (human-readabl
 
 `output/networkx_output/knowledge_graph.html` is a self-contained force-directed graph visualization built with vis.js. It requires no server. It supports filtering nodes and edges by type, filtering by confidence threshold, name search, and hover popups with full attribute values.
 
+**Render ceiling (D61).** The export builds a `vis.DataSet` holding every node and edge, so a large graph overwhelms the browser DOM. Above `export.html_max_nodes` nodes the HTML file is not written at all: `export_html` returns `""`, a `UserWarning` names the count and the limit, and the caller omits the filename from its written-files list. The comparison is `>`, so a graph of exactly the limit still renders. Every other output format — JSONL, Turtle, the remaining NetworkX formats, the Obsidian vault and the Neo4j CSV bundle — is written normally; only the visualisation is skipped.
+
+The key defaults to `5000` and is read from the active profile's `pipeline.export:` block (alongside `networkx_enabled`, `obsidian_enabled` and the rest), but is deliberately **absent from both shipped `mykg_config.yaml` files** — the same treatment as `llm.temperature_unsupported_prefixes` (D3) and `pass2.domain_range_policy` (D60). Add it to change the default:
+
+```yaml
+profiles:
+  <active-profile>:
+    pipeline:
+      export:
+        html_max_nodes: 20000   # -1 disables the ceiling entirely
+```
+
 ### Obsidian Vault
 
 `output/obsidian_vault/` is a directory of linked Markdown files that can be opened directly as a vault in [Obsidian](https://obsidian.md). One `.md` note is written per extracted entity, grouped into subdirectories by concept type (e.g. `Person/`, `Organization/`). An `index.md` at the root summarizes node counts per type and links to every entity note.
@@ -531,7 +669,7 @@ Enabled by default via `pipeline.export.obsidian_enabled: true` in `mykg_config.
 
 ## MCP Server (`mykg mcp-serve`)
 
-`mykg mcp-serve` starts a local MCP (Model Context Protocol) server that exposes a completed knowledge graph session for LLM-powered Q&A. Any MCP-compatible client — Claude Desktop, Cherry Studio, MCP Inspector, or a custom agent — can connect and query the graph using 13 read-only tools.
+`mykg mcp-serve` starts a local MCP (Model Context Protocol) server that exposes a completed knowledge graph session for LLM-powered Q&A. Any MCP-compatible client — Claude Desktop, Cherry Studio, MCP Inspector, or a custom agent — can connect and query the graph using 15 read-only tools.
 
 ### Architecture
 
@@ -540,13 +678,13 @@ The server loads three files from a session via `load_session()` (`src/mykg/expo
 - `output/edges.jsonl` — typed relationships with confidence, provenance
 - `intermediate/schema.json` — concept hierarchy and property definitions
 
-At startup, a `KnowledgeGraph` object builds in-memory indexes (nodes by ID, nodes by type, edges by node, name/alias search index) and a NetworkX `DiGraph` for graph algorithms. This data is loaded once via FastMCP's lifespan mechanism and shared across all tool calls.
+At startup, a `KnowledgeGraph` object builds in-memory indexes (nodes by ID, nodes by type, edges by node, name/alias search index, BM25 search index — see D59) and a NetworkX `DiGraph` for graph algorithms. This data is loaded once via FastMCP's lifespan mechanism and shared across all tool calls.
 
 ### Tools
 
 | Tool | What it does |
 |---|---|
-| `mykg_search_nodes` | Substring search across names, aliases, attributes; ranked by relevance |
+| `mykg_search_nodes` | BM25-ranked search across names, aliases, attributes (D59) |
 | `mykg_get_node` | Full node details by stable ID |
 | `mykg_get_neighbors` | Connected nodes with direction and edge type filtering |
 | `mykg_find_path` | Shortest path between two nodes via `nx.shortest_path` |
@@ -557,8 +695,11 @@ At startup, a `KnowledgeGraph` object builds in-memory indexes (nodes by ID, nod
 | `mykg_query_graph` | BFS/DFS traversal from seed nodes with token budget |
 | `mykg_hub_nodes` | Most connected nodes by degree |
 | `mykg_orphan_nodes` | Isolated nodes with zero edges |
+| `mykg_get_source` | Source-text excerpts behind a node or edge |
 | `mykg_read_note` | Obsidian vault LLM wiki note for an entity |
 | `mykg_list_sessions` | All available sessions with status and size |
+| `mykg_reload` | Re-read the session files and rebuild the in-memory graph |
+| `mykg_schema_drift` | Read-only report of schema concepts/properties no node or edge uses |
 
 ### Transport
 
@@ -588,17 +729,19 @@ The mykg skill (`/mykg`) and the mykg MCP server (`mykg mcp-serve`) are compleme
 |---|---|---|---|
 | **— Write / Pipeline Operations —** | | | |
 | Extract graph (fresh session) | **yes** — `extract-graph <dir>` | no | Skill drives the full LLM pipeline via inbox/outbox |
-| Append to session | **yes** — `--append` | no | |
-| Append + grow schema | **yes** — `--append-with-grow-schema` | no | D52 locked Pass 1 |
+| Append to session (new files) | **yes** — `--append` | no | D58: NEW files only; modified/deleted are warned about |
+| Sync: reconcile modified + deleted | **yes** — `--update` (= `--append --sync`) | no | D58 |
+| Append + grow schema | **yes** — `--append-with-grow-schema` | no | D52 locked Pass 1; add `--sync` to reconcile too |
 | Resume / continue session | **yes** — `--session <name>` | no | |
 | Re-run from step | **yes** — `--from-step <step>` | no | Includes orphan fullsweep/incremental aliases |
 | Approve schema | **yes** — `approve-schema` | no | |
 | Generate walkthrough | **yes** — `walkthrough` | no | |
+| Detect / preview / apply schema pruning | **yes** — `detect-schema-drift`, `prune-schema` | no | D62; the MCP server only reports (below) |
 | Parse docs (MinerU) | **yes** — `parse-docs` | no | |
 | Fetch web / clone repo | **yes** — `fetch-web` | no | Including chained fetch+extract |
 | Start/stop MCP server | **yes** — `mcp-serve` | no | |
 | **— Read / Query Operations —** | | | |
-| Search nodes by name/alias/attr | manual grep/Read | **`mykg_search_nodes`** | MCP has ranked matching (exact > prefix > substring > alias > attr) |
+| Search nodes by name/alias/attr | manual grep/Read | **`mykg_search_nodes`** | MCP has BM25-ranked matching over name/type/aliases/attributes (D59) |
 | Get full node details by ID | manual Read + grep | **`mykg_get_node`** | MCP returns structured JSON with all attributes |
 | Get node neighbors + edges | manual grep on edges.jsonl | **`mykg_get_neighbors`** | MCP supports direction filter (in/out/both), edge type filter |
 | Find shortest path | **no** | **`mykg_find_path`** | MCP uses NetworkX; directed then undirected fallback |
@@ -611,6 +754,7 @@ The mykg skill (`/mykg`) and the mykg MCP server (`mykg mcp-serve`) are compleme
 | Orphan nodes (zero edges) | **no** | **`mykg_orphan_nodes`** | MCP returns all isolated nodes |
 | Read Obsidian vault note | manual Read of .md file | **`mykg_read_note`** | MCP resolves node_id to vault path; fallback if no vault |
 | List sessions + status | `ls -td mykg_sessions/*/` | **`mykg_list_sessions`** | MCP shows current/complete/incomplete, counts, vault status |
+| Schema drift report (unused concepts/properties) | `detect-schema-drift` (also records `schema_drift.json`) | **`mykg_schema_drift`** | Read-only live computation; never writes or prunes |
 | Free-text query (vault or jsonl) | **yes** — Stage 4d routing | partial (`mykg_query_graph`) | Skill routes vault-vs-jsonl by question phrasing; MCP does BFS/DFS traversal only |
 
 **Summary:**
@@ -657,12 +801,13 @@ The pipeline applies two tiers of automatic correction before asking for human i
 
 ## LLM Provider Support
 
-The pipeline is fully decoupled from any specific LLM provider. A single abstract adapter interface — accepting a system prompt and a user prompt, returning a string — is all that pipeline logic depends on. Six provider implementations ship out of the box:
+The pipeline is fully decoupled from any specific LLM provider. A single abstract adapter interface — accepting a system prompt and a user prompt, returning a string — is all that pipeline logic depends on. Seven provider implementations ship out of the box:
 
 | Provider | Notes |
 |---|---|
 | Anthropic (Claude) | Recommended for quality; supports prompt caching |
 | OpenAI (GPT-4o) | Also works with Azure OpenAI and any OpenAI-compatible endpoint |
+| Google Gemini | Native `google-genai` SDK. The shipped profile mirrors the `openai` token budgets (128K window); the models themselves support up to 1M, so raise `llm.context_window` and rerun the context-calculator to exploit it. Implicit context caching is automatic and server-side — the adapter implements no caching, it only reports `cache_read_tokens`. The reasoning budget is drawn from the same `max_output_tokens` allowance as the answer and defaults to `low`; add an optional `llm.thinking_level` key to the profile to change it |
 | Ollama | Local inference; no API key required |
 | OpenRouter | Access many models via a single API key |
 | Claude CLI | Uses the `claude -p` subprocess; no API key; billing via Claude Pro/Max plan; serial only |
@@ -670,9 +815,56 @@ The pipeline is fully decoupled from any specific LLM provider. A single abstrac
 
 All provider parameters — model, context window, token limits, timeout, base URL — are set in `mykg_config.yaml`. There are no hardcoded defaults in adapter code. A 429 rate-limit response is treated as a misconfiguration signal (reduce worker count), not a transient error to silently retry indefinitely.
 
+#### Sampling temperature
+
+myKG sends **`temperature: 0.0`** on every call by default
+(`DEFAULT_TEMPERATURE` in `llm/temperature.py`). Extraction is a
+structured-output task: the same corpus should induce the same schema and yield
+the same graph run over run, and provider defaults (~1.0) work against that.
+
+The default is resolved for all seven adapters, but only five can act on it.
+`claude-cli` and `agent` accept and discard it (see the table below), so the
+reproducibility guarantee does not extend to those two profiles — a caveat worth
+stating plainly rather than leaving implicit in the table.
+
+The key stays absent from the shipped profiles — the default lives in code, not
+config. A profile may override it, and an explicit `temperature:` (null) means
+"send nothing", restoring each provider's own default.
+
+The set of model families that reject an explicit temperature is a **default,
+not a hardcoded rule**. Provider lineups change faster than mykg releases, so
+`llm.temperature_unsupported_prefixes` in the active profile replaces the
+built-in list without a code change (Invariant 7), and an explicitly empty list
+disables the check. Only the `openai` and `openrouter` adapters consult it —
+the others have no family that rejects the parameter. The shipped
+`mykg_config.yaml` files are left untouched, without even a comment: this knob
+is documented here, in the contributor docs, and nowhere a user would meet it.
+
+It is reachable three ways, in increasing order of scope: a per-call argument to
+`complete()` / `llm_complete_with_retry()`, an adapter constructor argument, and
+— as an undocumented escape hatch — an `llm.temperature` key if one is present
+in the active profile. The last exists because the factory reads the `llm:`
+block uniformly; it is deliberately not advertised, so treat it as unsupported
+rather than as public API.
+
+A `None` value — whether from an explicit YAML null or from a model that
+rejects the parameter — is omitted from the request entirely rather than sent as
+a null, which is what lets one code path serve providers with very different
+support:
+
+| Provider | Temperature |
+|---|---|
+| Anthropic | Honoured (0.0–1.0) |
+| OpenAI | Honoured, except reasoning families (o1/o3/o4, gpt-5 by default), which reject an explicit value — it is omitted for them automatically, so the shipped `openai` profile (a gpt-5 model) keeps working even if a temperature is supplied. The prefix list is a default, not a hardcoded rule: `llm.temperature_unsupported_prefixes` in the active profile replaces it, and an empty list disables the check. If an unlisted model rejects it at runtime, the adapter warns once, retries without it, and omits it for the rest of the run |
+| OpenRouter | Honoured; vendor-namespaced reasoning models (`openai/gpt-5-*`) are recognised and omitted like their bare equivalents |
+| Gemini | Honoured |
+| Ollama | Honoured, sent inside the `options` object |
+| Claude CLI | Accepted and ignored — `claude -p` exposes no temperature flag |
+| Agent (Claude Code skill) | Accepted and ignored — the host session has no temperature dial; deliberately not added to the task envelope |
+
 ### Agent provider — adapter that polls a filesystem
 
-The Agent provider is the sixth `LLMAdapter` subclass, not a fork of the orchestrator. The 12 pipeline steps, all 14 LLM call sites, every `prompts/*.txt` template, and the `ThreadPoolExecutor` parallelism in `pass1` / `pass2` / `orphan_connect` are unchanged. Only the implementation of `LLMAdapter.complete(system, user) → str` differs: instead of making an HTTP request, it writes a JSON task envelope to disk and polls for the response. This keeps the entire correctness story of mykg's deterministic pipeline — re-entry, sentinel-based completion checks, retry-once + LLM feedback — applicable verbatim to agent mode.
+The Agent provider is the seventh `LLMAdapter` subclass, not a fork of the orchestrator. The 12 pipeline steps, all 14 LLM call sites, every `prompts/*.txt` template, and the `ThreadPoolExecutor` parallelism in `pass1` / `pass2` / `orphan_connect` are unchanged. Only the implementation of `LLMAdapter.complete(system, user) → str` differs: instead of making an HTTP request, it writes a JSON task envelope to disk and polls for the response. This keeps the entire correctness story of mykg's deterministic pipeline — re-entry, sentinel-based completion checks, retry-once + LLM feedback — applicable verbatim to agent mode.
 
 The request/response contract lives entirely on the filesystem under each session's `intermediate/` directory. The adapter writes `agent_inbox/<task_id>.task.json` (containing the system prompt, user prompt, step name, and a context label) atomically via the `.tmp` + `rename` pattern. The skill on the other side reads the task, dispatches a subagent, and writes the answer envelope to `agent_outbox/<task_id>.answer.json` — again atomically. After the answer file is fully renamed, the skill creates a zero-byte sentinel at `agent_outbox/<task_id>.done`. The adapter polls only for the sentinel, never for the answer file, so it can never observe a half-written response.
 
@@ -696,9 +888,9 @@ The Claude Code skill in `src/mykg/data/skills/mykg/SKILL.md` exposes a single s
 | **Session isolation** | Each run lives in a timestamped folder containing its own inputs, intermediate state, outputs, and logs | Runs never interfere; any run can be resumed or re-entered independently without touching other sessions |
 | **Single config file** | `mykg_config.yaml` is the sole source of truth for all parameters | No hardcoded literals in pipeline or adapter code; switching provider, model, or tuning parameters requires only a config change |
 | **Pydantic for all data models** | All structured data between pipeline stages uses Pydantic BaseModel | Free JSON serialization, field validation, and type coercion at every pipeline boundary |
-| **Filesystem-backed agent provider** | Sixth `LLMAdapter` subclass that writes JSON tasks to a session-local inbox and polls a `.done` sentinel | Lets a Claude Code skill — or any other host with file access — supply LLM answers without modifying the 12-step pipeline, the orchestrator, or any of the 14 LLM call sites. The contract is JSON files on disk; testable with a mock drainer in `tmp_path` |
+| **Filesystem-backed agent provider** | Seventh `LLMAdapter` subclass that writes JSON tasks to a session-local inbox and polls a `.done` sentinel | Lets a Claude Code skill — or any other host with file access — supply LLM answers without modifying the 12-step pipeline, the orchestrator, or any of the 14 LLM call sites. The contract is JSON files on disk; testable with a mock drainer in `tmp_path` |
 | **Fetch-web as a standalone acquisition command** | `mykg fetch-web` has no session, no LLM calls, and no pipeline step of its own — it just writes a folder shaped like an `extract-graph` input | Acquisition and provenance are decoupled from extraction; the output folder can be inspected, edited, or reused independently before any LLM cost is incurred |
-| **MCP server as a query-only layer** | `mykg mcp-serve` loads a completed session into memory and serves 13 read-only tools via MCP; no extraction, no writes, no LLM calls | Clean separation between the extraction pipeline (expensive, long-running, write-heavy) and the query layer (fast, in-memory, read-only); any MCP client can query without understanding the pipeline |
+| **MCP server as a query-only layer** | `mykg mcp-serve` loads a completed session into memory and serves 15 read-only tools via MCP; no extraction, no writes, no LLM calls | Clean separation between the extraction pipeline (expensive, long-running, write-heavy) and the query layer (fast, in-memory, read-only); any MCP client can query without understanding the pipeline |
 | **GitHub URL → shallow clone, not crawl** | `is_github_repo_url()` routes `github.com/<owner>/<repo>` to `git clone --depth N`, skipping Crawlee and the venv entirely | A repo's source files are better obtained via git than by crawling rendered HTML pages; avoids paying the Crawlee venv cost when it adds no value |
 | **Ephemeral Crawlee venv (mirrors MinerU)** | Crawlee runs in a per-invocation `uv`-managed venv, deleted on exit | Keeps Crawlee's dependency footprint out of mykg's own interpreter, exactly like the MinerU pattern in `preprocess` (D48) |
 | **Per-seed independent caps in `--url-list`** | Each seed in a multi-seed fetch gets its own `max_pages`/`max_depth`; no global budget | One large seed can't starve the others; per-seed manifests stay independently interpretable |
@@ -752,6 +944,7 @@ myKG is an *extractor*, not a *reasoner*. The base schema parser accepts OWL voc
 | **Stable human-readable IDs** | Node IDs derived from type + canonical name (e.g., `person-alice-smith`) | Deterministic across runs; readable in raw files; stable across re-runs and merges without a lookup table |
 | **Mandatory parallelism** | All stages operating over independent items (files, chunks, candidates) must use `ThreadPoolExecutor`; serial loops are a bug | Keeps wall-clock time proportional to the slowest item, not the sum; worker count always configurable via config |
 | **Fine-grained resumability** | Pass 2 writes a per-file shard immediately when each file completes | A crash mid-corpus loses at most the one file in flight; all completed files are skipped on restart |
+| **`per_file` truncation cap** | `per_file_token_target` truncates a file to its first N tokens before chunking (tail dropped, logged, recorded in `oversized_files.json`); `0` disables it | Bounds per-file LLM cost in `per_file` mode — the analogue of `concat_batch_token_target` / `batch_token_target`; a single pathologically large file can no longer produce an unbounded run of serial calls. Off by default in the shared engine so `concat`/surgical callers never truncate |
 | **Lossless confidence-1.0 merge** | When two sources both have maximum confidence and different string values, concatenate with `"; "` rather than discarding one | No information lost silently; downstream consumers can split on `"; "` if needed |
 
 ### Orphan Pass and Correction
