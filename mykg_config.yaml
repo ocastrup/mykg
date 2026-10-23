@@ -1211,6 +1211,7 @@ profiles:
         prep_mode: per_file
         concat_batch_token_target: 23000
         batch_token_target: 23000
+        per_file_token_target: 16000   # token cap per file; used when prep_mode=per_file. Files over this are truncated to the first N tokens. 0 = no cap
         batch_per_file: false
         batch_retry_max: 1
       normalize_names:

@@ -209,6 +209,14 @@ def test_install_agent_skill_force_overwrites(monkeypatch, tmp_path, capsys):
     assert (target / "SKILL.md").read_text() == "# fake skill\n"
 
 
+def _symlink_or_skip(link: Path, target: Path) -> None:
+    """Create a symlink, skipping on Windows without symlink privilege."""
+    try:
+        link.symlink_to(target)
+    except OSError as exc:
+        pytest.skip(f"cannot create symlinks on this platform: {exc}")
+
+
 def test_install_agent_skill_legacy_symlink_no_force(monkeypatch, tmp_path, capsys):
     """Symlink at target without --force -> warns, returns."""
     from mykg import cli
@@ -220,7 +228,7 @@ def test_install_agent_skill_legacy_symlink_no_force(monkeypatch, tmp_path, caps
     target = skills_dir / "mykg"
     real_other = tmp_path / "other"
     real_other.mkdir()
-    target.symlink_to(real_other)
+    _symlink_or_skip(target, real_other)
 
     monkeypatch.setattr(cli, "_claude_skills_dir", lambda: skills_dir)
 
@@ -242,7 +250,7 @@ def test_install_agent_skill_legacy_symlink_with_force(monkeypatch, tmp_path, ca
     target = skills_dir / "mykg"
     real_other = tmp_path / "other"
     real_other.mkdir()
-    target.symlink_to(real_other)
+    _symlink_or_skip(target, real_other)
 
     monkeypatch.setattr(cli, "_claude_skills_dir", lambda: skills_dir)
 

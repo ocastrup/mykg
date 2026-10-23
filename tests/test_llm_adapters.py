@@ -3940,7 +3940,7 @@ def test_unconfigured_reasoning_model_still_omits(monkeypatch):
     assert "temperature" not in kwargs
 
 
-def test_shipped_default_profile_resolves_the_zero_default(monkeypatch):
+def test_shipped_default_profile_resolves_the_zero_default(monkeypatch, tmp_path):
     """End-to-end on whatever profile the shipped config actually selects.
 
     The wire assertion is conditional on the active model, deliberately: pinning
@@ -3962,7 +3962,13 @@ def test_shipped_default_profile_resolves_the_zero_default(monkeypatch):
     from mykg.llm.config import load_adapter
     from mykg.llm.temperature import DEFAULT_TEMPERATURE, temperature_unsupported
 
-    adapter = load_adapter()
+    try:
+        adapter = load_adapter()
+    except ValueError as exc:
+        if "intermediate_dir" not in str(exc):
+            raise
+        # Agent-provider profiles need a session intermediate dir to construct.
+        adapter = load_adapter(intermediate_dir=tmp_path)
     assert adapter._temperature == DEFAULT_TEMPERATURE == 0.0
 
     model = getattr(adapter, "_model", "")

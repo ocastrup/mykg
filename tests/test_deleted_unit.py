@@ -23,13 +23,16 @@ def test_shard_owned_by_deleted_file_is_unlinked(tmp_path):
 
 
 def test_colliding_shard_survives_and_warns(tmp_path, caplog):
-    """_fname_slug maps / and _ to the same char, so `docs/a.md` and `docs_a.md`
-    share a shard name. Unlinking blind would destroy the surviving file's
-    extraction with nothing to re-create it — deletion has no re-extraction
-    backstop the way a modification does.
+    """`_fname_slug` is now collision-free across distinct source paths (the
+    sanitized form carries a hash of the original path), but legacy sessions
+    may still hold a shard whose `_fname` stamp differs from the deletion
+    target. The ownership guard must leave such shards untouched: unlinking
+    blind would destroy the surviving file's extraction with nothing to
+    re-create it — deletion has no re-extraction backstop the way a
+    modification does.
     """
     shard = _shard(tmp_path / "docs_a.md.json", "docs_a.md")
-    assert _fname_slug("docs/a.md") == _fname_slug("docs_a.md")
+    assert _fname_slug("docs/a.md") != _fname_slug("docs_a.md")
 
     with caplog.at_level(logging.WARNING):
         _unlink_shard_if_owned(shard, "docs/a.md")
